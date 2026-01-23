@@ -17,6 +17,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
 
+# Controllo rapido per debug (puoi togliere dopo)
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or not DISCOGS_USER_TOKEN:
+    print("⚠️ Attenzione: alcune variabili d'ambiente non sono impostate correttamente!")
+
 # ===== INTERVALLI =====
 CHECK_INTERVAL = 300        # 5 minuti tra controlli
 DELAY_BETWEEN_CALLS = 1.2
@@ -41,6 +45,9 @@ def save_state():
 
 # ===== TELEGRAM =====
 def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram non configurato. Messaggio non inviato:", msg)
+        return
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -119,6 +126,10 @@ app = Flask(__name__)
 def home():
     print("Ping ricevuto ✅")   # log per Uptime Robot
     return "Bot Discogs attivo ✅"
+
+@app.route("/ping")
+def ping():
+    return "Bot online e attivo ✅", 200
 
 # ===== START =====
 if __name__ == "__main__":
