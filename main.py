@@ -1,6 +1,5 @@
-print("🤖 Bot Discogs avviato! In ascolto...")
+print("🤖 Bot Discogs avviato! In ascolto (modalità test)…")
 
-# ===== IMPORT =====
 from dotenv import load_dotenv
 load_dotenv()
 import os
@@ -10,17 +9,17 @@ import json
 import threading
 from requests.exceptions import RequestException, HTTPError
 
-# ===== VARIABILI D'AMBIENTE =====
+# ===== VARIABILI =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DISCOGS_USER = os.getenv("DISCOGS_USER") or "tuo_username_discogs"
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
 
 if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCOGS_USER, DISCOGS_USER_TOKEN]):
-    print("⚠️ Attenzione: alcune variabili potrebbero non essere impostate correttamente!")
+    print("⚠️ Alcune variabili non sono impostate correttamente!")
 
 # ===== INTERVALLI =====
-CHECK_INTERVAL = 300        # ogni 5 minuti
+CHECK_INTERVAL = 60        # ogni 1 minuto per test
 DELAY_BETWEEN_CALLS = 1.2
 STATE_FILE = "seen_items.json"
 
@@ -29,7 +28,7 @@ HEADERS = {
     "Authorization": f"Discogs token={DISCOGS_USER_TOKEN}"
 }
 
-# ===== LOAD STATO =====
+# ===== STATO =====
 if os.path.exists(STATE_FILE):
     with open(STATE_FILE, "r") as f:
         seen_items = set(json.load(f))
@@ -80,14 +79,12 @@ def check_marketplace(release_id):
 
 # ===== BOT LOOP =====
 def discogs_bot():
-    send_telegram("🤖 Bot Discogs avviato correttamente!")
     print("Bot Discogs avviato e in ascolto…")
-
     last_ping = time.time()
 
     while True:
         try:
-            # Log regolare per dimostrare che il bot è attivo
+            # Log regolare per Railway Free
             if time.time() - last_ping > 60:
                 print("⏱ Bot attivo, controllo wantlist…")
                 last_ping = time.time()
@@ -126,11 +123,14 @@ def discogs_bot():
 
         except Exception as e:
             print(f"⚠️ Errore generale: {e}")
-            time.sleep(60)
+            time.sleep(30)
 
 # ===== START =====
 if __name__ == "__main__":
+    import threading
     threading.Thread(target=discogs_bot, daemon=True).start()
-    # Flask non serve più per worker puro, quindi rimosso per semplicità
+
+    # Mantieni il worker attivo con log ogni minuto
     while True:
+        print("⏱ Worker attivo, in attesa del prossimo controllo…")
         time.sleep(60)
