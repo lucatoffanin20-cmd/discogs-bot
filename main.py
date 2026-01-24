@@ -15,10 +15,10 @@ from requests.exceptions import RequestException, HTTPError
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DISCOGS_USER = os.getenv("DISCOGS_USER") or "tuo_username_discogs"  # fallback sicuro
-DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
+DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN")
 
 # Controllo rapido (avviso, non blocca più l'esecuzione)
-if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCOGS_USER, DISCOGS_USER_TOKEN]):
+if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCOGS_USER, DISCOGS_TOKEN]):
     print("⚠️ Attenzione: alcune variabili potrebbero non essere impostate correttamente!")
 
 # ===== INTERVALLI =====
@@ -28,7 +28,7 @@ STATE_FILE = "seen_items.json"
 
 HEADERS = {
     "User-Agent": "DiscogsWantlistNotifier/1.0",
-    "Authorization": f"Discogs token={DISCOGS_USER_TOKEN}"
+    "Authorization": f"Discogs token={DISCOGS_TOKEN}"
 }
 
 # ===== LOAD STATO =====
