@@ -2,7 +2,7 @@ print("🤖 Bot Discogs avviato! In ascolto...")
 
 # ===== IMPORT =====
 from dotenv import load_dotenv
-load_dotenv()  # carica eventuali variabili dal file .env locale
+load_dotenv()
 import os
 import requests
 import time
@@ -11,17 +11,17 @@ import threading
 from flask import Flask
 from requests.exceptions import RequestException, HTTPError
 
-# ===== VARIABILI D'AMBIENTE CON FALLBACK =====
+# ===== VARIABILI D'AMBIENTE =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DISCOGS_USER = os.getenv("DISCOGS_USER") or "tuo_username_discogs"  # fallback sicuro
+DISCOGS_USER = os.getenv("DISCOGS_USER") or "tuo_username_discogs"
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
 
 if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCOGS_USER, DISCOGS_USER_TOKEN]):
     print("⚠️ Attenzione: alcune variabili potrebbero non essere impostate correttamente!")
 
 # ===== INTERVALLI =====
-CHECK_INTERVAL = 300        # 5 minuti tra controlli
+CHECK_INTERVAL = 300
 DELAY_BETWEEN_CALLS = 1.2
 STATE_FILE = "seen_items.json"
 
@@ -44,7 +44,6 @@ def save_state():
 # ===== TELEGRAM =====
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram non configurato. Messaggio non inviato:", msg)
         return
     try:
         r = requests.post(
@@ -54,7 +53,7 @@ def send_telegram(msg):
         )
         r.raise_for_status()
     except RequestException as e:
-        print("Errore Telegram:", e)
+        print(f"⚠️ Errore Telegram: {e}")
 
 # ===== DISCOGS =====
 def get_wantlist(page=1):
@@ -71,14 +70,14 @@ def check_marketplace(release_id):
         return r.json().get("results", [])
     except HTTPError as e:
         if r.status_code == 404:
-            # Non ci sono articoli in vendita per questo release_id → silenzia log
-            return []
+            return []  # Silenzia 404
         elif r.status_code == 429:
             print("⚠️ Rate limit Discogs, pausa 60s")
             time.sleep(60)
             return []
         else:
-            raise e
+            print(f"⚠️ Errore Discogs ({release_id}): {e}")
+            return []
 
 # ===== BOT LOOP =====
 def discogs_bot():
@@ -96,19 +95,21 @@ def discogs_bot():
                     release_id = item["id"]
                     listings = check_marketplace(release_id)
 
-                    for l in listings:
+                    # Filtra solo i nuovi articoli
+                    new_listings = [l for l in listings if str(l["id"]) not in seen_items]
+
+                    for l in new_listings:
                         uid = str(l["id"])
-                        if uid not in seen_items:
-                            seen_items.add(uid)
-                            save_state()
-                            msg = (
-                                f"🎵 NUOVO ARTICOLO!\n"
-                                f"{l['title']}\n"
-                                f"Prezzo: {l['price']['value']} {l['price']['currency']}\n"
-                                f"https://www.discogs.com/sell/item/{uid}"
-                            )
-                            send_telegram(msg)
-                            print(f"✅ Notifica inviata: {l['title']}")
+                        seen_items.add(uid)
+                        save_state()
+                        msg = (
+                            f"🎵 NUOVO ARTICOLO!\n"
+                            f"{l['title']}\n"
+                            f"Prezzo: {l['price']['value']} {l['price']['currency']}\n"
+                            f"https://www.discogs.com/sell/item/{uid}"
+                        )
+                        send_telegram(msg)
+                        print(f"✅ Notifica inviata: {l['title']}")
 
                     time.sleep(DELAY_BETWEEN_CALLS)
 
@@ -119,7 +120,7 @@ def discogs_bot():
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print("⚠️ Errore generale:", e)
+            print(f"⚠️ Errore generale: {e}")
             time.sleep(60)
 
 # ===== FLASK SERVER (UPTIME ROBOT) =====
@@ -127,7 +128,6 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    print("Ping ricevuto ✅")
     return "Bot Discogs attivo ✅"
 
 @app.route("/ping")
