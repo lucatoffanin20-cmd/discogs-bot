@@ -17,7 +17,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DISCOGS_USER = os.getenv("DISCOGS_USER") or "tuo_username_discogs"  # fallback sicuro
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
 
-# Controllo rapido (avviso, non blocca più l'esecuzione)
 if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCOGS_USER, DISCOGS_USER_TOKEN]):
     print("⚠️ Attenzione: alcune variabili potrebbero non essere impostate correttamente!")
 
@@ -38,7 +37,6 @@ if os.path.exists(STATE_FILE):
 else:
     seen_items = set()
 
-# ===== SALVA STATO =====
 def save_state():
     with open(STATE_FILE, "w") as f:
         json.dump(list(seen_items), f)
@@ -67,16 +65,20 @@ def get_wantlist(page=1):
 
 def check_marketplace(release_id):
     url = "https://api.discogs.com/marketplace/search"
-    r = requests.get(url, headers=HEADERS, params={"release_id": release_id})
     try:
+        r = requests.get(url, headers=HEADERS, params={"release_id": release_id})
         r.raise_for_status()
+        return r.json().get("results", [])
     except HTTPError as e:
-        if r.status_code == 429:
+        if r.status_code == 404:
+            # Non ci sono articoli in vendita per questo release_id → silenzia log
+            return []
+        elif r.status_code == 429:
             print("⚠️ Rate limit Discogs, pausa 60s")
             time.sleep(60)
             return []
-        raise e
-    return r.json().get("results", [])
+        else:
+            raise e
 
 # ===== BOT LOOP =====
 def discogs_bot():
@@ -106,6 +108,7 @@ def discogs_bot():
                                 f"https://www.discogs.com/sell/item/{uid}"
                             )
                             send_telegram(msg)
+                            print(f"✅ Notifica inviata: {l['title']}")
 
                     time.sleep(DELAY_BETWEEN_CALLS)
 
@@ -116,7 +119,7 @@ def discogs_bot():
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print("Errore generale:", e)
+            print("⚠️ Errore generale:", e)
             time.sleep(60)
 
 # ===== FLASK SERVER (UPTIME ROBOT) =====
@@ -124,7 +127,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    print("Ping ricevuto ✅")   # log per Uptime Robot
+    print("Ping ricevuto ✅")
     return "Bot Discogs attivo ✅"
 
 @app.route("/ping")
