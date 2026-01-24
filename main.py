@@ -8,7 +8,6 @@ import requests
 import time
 import json
 import threading
-from flask import Flask
 from requests.exceptions import RequestException, HTTPError
 
 # ===== VARIABILI D'AMBIENTE =====
@@ -21,7 +20,7 @@ if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCOGS_USER, DISCOGS_USER_TOKEN])
     print("⚠️ Attenzione: alcune variabili potrebbero non essere impostate correttamente!")
 
 # ===== INTERVALLI =====
-CHECK_INTERVAL = 300
+CHECK_INTERVAL = 300        # ogni 5 minuti
 DELAY_BETWEEN_CALLS = 1.2
 STATE_FILE = "seen_items.json"
 
@@ -70,7 +69,7 @@ def check_marketplace(release_id):
         return r.json().get("results", [])
     except HTTPError as e:
         if r.status_code == 404:
-            return []  # Silenzia 404
+            return []  # silenzia 404
         elif r.status_code == 429:
             print("⚠️ Rate limit Discogs, pausa 60s")
             time.sleep(60)
@@ -84,8 +83,15 @@ def discogs_bot():
     send_telegram("🤖 Bot Discogs avviato correttamente!")
     print("Bot Discogs avviato e in ascolto…")
 
+    last_ping = time.time()
+
     while True:
         try:
+            # Log regolare per dimostrare che il bot è attivo
+            if time.time() - last_ping > 60:
+                print("⏱ Bot attivo, controllo wantlist…")
+                last_ping = time.time()
+
             page = 1
             while True:
                 data = get_wantlist(page)
@@ -95,7 +101,6 @@ def discogs_bot():
                     release_id = item["id"]
                     listings = check_marketplace(release_id)
 
-                    # Filtra solo i nuovi articoli
                     new_listings = [l for l in listings if str(l["id"]) not in seen_items]
 
                     for l in new_listings:
@@ -123,18 +128,9 @@ def discogs_bot():
             print(f"⚠️ Errore generale: {e}")
             time.sleep(60)
 
-# ===== FLASK SERVER (UPTIME ROBOT) =====
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot Discogs attivo ✅"
-
-@app.route("/ping")
-def ping():
-    return "Bot online e attivo ✅", 200
-
 # ===== START =====
 if __name__ == "__main__":
     threading.Thread(target=discogs_bot, daemon=True).start()
-    app.run(host="0.0.0.0", port=3000)
+    # Flask non serve più per worker puro, quindi rimosso per semplicità
+    while True:
+        time.sleep(60)
