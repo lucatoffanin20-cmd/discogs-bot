@@ -71,9 +71,10 @@ def get_latest_listing(release_id):
 
 # ================= LOOP PRINCIPALE =================
 def bot_loop():
-    if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET, DISCOGS_USER]):
+   if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET, DISCOGS_USER]):
     print("❌ ERRORE: una o più variabili mancano!")
     exit(1)
+
 
     wants = get_wantlist()
 
