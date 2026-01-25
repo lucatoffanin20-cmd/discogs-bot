@@ -3,99 +3,100 @@ print("🤖 Discogs Wantlist Notifier avviato")
 import os
 import time
 import requests
+from requests_oauthlib import OAuth1
 from dotenv import load_dotenv
-from requests.exceptions import RequestException
 
 # ================= CONFIG =================
-
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
 
-CHECK_INTERVAL = 180  # 3 minuti
+CONSUMER_KEY = os.getenv("CONSUMER_KEY")
+CONSUMER_SECRET = os.getenv("CONSUMER_SECRET")
+OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
+OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
+DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-HEADERS = {
-    "User-Agent": "DiscogsWantlistNotifier/1.0",
-    "Authorization": f"Discogs token={DISCOGS_USER_TOKEN}"
-}
+CHECK_INTERVAL = 300        # 5 minuti tra controlli
+DELAY_BETWEEN_CALLS = 1.1   # sicurezza rate limit
+
+# ================= AUTENTICAZIONE OAUTH =================
+auth = OAuth1(
+    CONSUMER_KEY,
+    CONSUMER_SECRET,
+    OAUTH_TOKEN,
+    OAUTH_TOKEN_SECRET
+)
 
 # ================= STATE =================
-
-last_seen_timestamp = 0
+# registro ultimo listing per release_id
+last_seen = {}  # release_id -> listing_id
 
 # ================= TELEGRAM =================
-
-def send_telegram(message):
+def send_telegram(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
             timeout=10
         )
-    except RequestException as e:
+    except Exception as e:
         print(f"⚠️ Errore Telegram: {e}")
 
-# ================= DISCOGS =================
+# ================= WANTLIST =================
+def get_wantlist():
+    url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
+    r = requests.get(url, auth=auth)
+    r.raise_for_status()
+    return r.json()["wants"]
 
-def get_latest_wantlist_listings():
+# ================= MARKETPLACE =================
+def get_latest_listing(release_id):
     url = "https://api.discogs.com/marketplace/search"
     params = {
-        "want": "true",
+        "release_id": release_id,
         "sort": "listed",
         "sort_order": "desc",
-        "per_page": 50,
+        "per_page": 1,
         "page": 1
     }
-
-    r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+    r = requests.get(url, params=params, auth=auth)
     r.raise_for_status()
-    return r.json().get("results", [])
+    results = r.json().get("results", [])
+    return results[0] if results else None
 
-# ================= MAIN LOOP =================
-
+# ================= LOOP PRINCIPALE =================
 def bot_loop():
-    global last_seen_timestamp
-    print("👂 In ascolto dei nuovi annunci Discogs…")
-
-    # messaggio di avvio (ora ARRIVA)
     send_telegram("🤖 Discogs Wantlist Notifier avviato e operativo!")
+    print("👂 Bot attivo, in ascolto dei nuovi annunci...")
+
+    wants = get_wantlist()
 
     while True:
-        try:
-            listings = get_latest_wantlist_listings()
-            new_items = []
+        for w in wants:
+            rid = w["id"]
+            listing = get_latest_listing(rid)
+            if not listing:
+                continue
 
-            for item in listings:
-                posted = int(item.get("listed", 0))
+            lid = listing["id"]
+            if last_seen.get(rid) != lid:
+                last_seen[rid] = lid
+                msg = (
+                    f"🎵 NUOVO ARTICOLO IN WANTLIST!\n\n"
+                    f"{listing['title']}\n"
+                    f"💰 {listing['price']['value']} {listing['price']['currency']}\n"
+                    f"📦 Condizione: {listing.get('condition', 'N/D')}\n"
+                    f"🔗 https://www.discogs.com/sell/item/{lid}"
+                )
+                send_telegram(msg)
+                print(f"✅ Notifica inviata: {lid}")
 
-                if posted > last_seen_timestamp:
-                    new_items.append(item)
-
-            if new_items:
-                last_seen_timestamp = max(int(i["listed"]) for i in new_items)
-
-                for l in reversed(new_items):
-                    msg = (
-                        f"🎵 NUOVO ARTICOLO IN WANTLIST!\n\n"
-                        f"{l['title']}\n"
-                        f"💰 Prezzo: {l['price']['value']} {l['price']['currency']}\n"
-                        f"📦 Condizione: {l.get('condition', 'N/D')}\n"
-                        f"🔗 https://www.discogs.com/sell/item/{l['id']}"
-                    )
-                    send_telegram(msg)
-                    print(f"✅ Notifica inviata: {l['id']}")
-
-            else:
-                print("⏱ Nessun nuovo articolo")
-
-        except Exception as e:
-            print(f"⚠️ Errore: {e}")
+            time.sleep(DELAY_BETWEEN_CALLS)
 
         time.sleep(CHECK_INTERVAL)
 
 # ================= START =================
-
 if __name__ == "__main__":
     bot_loop()
