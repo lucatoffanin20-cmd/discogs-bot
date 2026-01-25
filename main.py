@@ -5,6 +5,7 @@ import time
 import requests
 from requests_oauthlib import OAuth1
 from dotenv import load_dotenv
+from flask import Flask
 
 # ================= CONFIG =================
 load_dotenv()
@@ -19,8 +20,8 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 # Intervalli
-CHECK_INTERVAL = 300        # controllo wantlist ogni 5 minuti
-DELAY_BETWEEN_CALLS = 1.2   # sicurezza rate limit Discogs
+CHECK_INTERVAL = 300        # ogni 5 minuti
+DELAY_BETWEEN_CALLS = 1.2   # rate limit sicurezza
 
 # ================= CONTROLLI =================
 if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET, DISCOGS_USER]):
@@ -91,11 +92,18 @@ def get_latest_listing(release_id):
         r.raise_for_status()
         results = r.json().get("results", [])
         return results[0] if results else None
+    except requests.exceptions.HTTPError as e:
+        if r.status_code == 404:
+            # Silenzia i 404: nessun annuncio attivo
+            return None
+        else:
+            print(f"⚠️ Errore get_latest_listing ({release_id}): {e}")
+            return None
     except Exception as e:
         print(f"⚠️ Errore get_latest_listing ({release_id}): {e}")
         return None
 
-# ================= LOOP PRINCIPALE =================
+# ================= BOT LOOP =================
 def bot_loop():
     send_telegram("🤖 Discogs Wantlist Notifier avviato e operativo!")
     print("👂 Bot attivo, in ascolto dei nuovi annunci...")
@@ -130,6 +138,18 @@ def bot_loop():
 
         time.sleep(CHECK_INTERVAL)
 
+# ================= FLASK SERVER =================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot attivo ✅"
+
 # ================= START =================
 if __name__ == "__main__":
-    bot_loop()
+    # Avvia bot in background
+    import threading
+    threading.Thread(target=bot_loop, daemon=True).start()
+
+    # Avvia Flask
+    app.run(host="0.0.0.0", port=8080)
