@@ -71,8 +71,9 @@ def get_latest_listing(release_id):
 
 # ================= LOOP PRINCIPALE =================
 def bot_loop():
-    send_telegram("🤖 Discogs Wantlist Notifier avviato e operativo!")
-    print("👂 Bot attivo, in ascolto dei nuovi annunci...")
+    if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET, DISCOGS_USER]):
+    print("❌ ERRORE: una o più variabili mancano!")
+    exit(1)
 
     wants = get_wantlist()
 
