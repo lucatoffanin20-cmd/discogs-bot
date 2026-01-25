@@ -18,8 +18,23 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 300        # 5 minuti tra controlli
-DELAY_BETWEEN_CALLS = 1.1   # sicurezza rate limit
+# Intervalli
+CHECK_INTERVAL = 300        # controllo wantlist ogni 5 minuti
+DELAY_BETWEEN_CALLS = 1.2   # sicurezza rate limit Discogs
+
+# ================= CONTROLLI =================
+if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET, DISCOGS_USER]):
+    missing = [v for v, val in {
+        "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
+        "CONSUMER_KEY": CONSUMER_KEY,
+        "CONSUMER_SECRET": CONSUMER_SECRET,
+        "OAUTH_TOKEN": OAUTH_TOKEN,
+        "OAUTH_TOKEN_SECRET": OAUTH_TOKEN_SECRET,
+        "DISCOGS_USER": DISCOGS_USER
+    }.items() if not val]
+    print(f"❌ Variabili mancanti o vuote: {missing}")
+    exit(1)
 
 # ================= AUTENTICAZIONE OAUTH =================
 auth = OAuth1(
@@ -29,27 +44,35 @@ auth = OAuth1(
     OAUTH_TOKEN_SECRET
 )
 
-# ================= STATE =================
-# registro ultimo listing per release_id
-last_seen = {}  # release_id -> listing_id
+# ================= STATO =================
+last_seen = {}  # release_id -> ultimo listing_id visto
 
 # ================= TELEGRAM =================
 def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram non configurato correttamente")
+        return
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
             timeout=10
         )
+        if r.status_code != 200:
+            print(f"⚠️ Errore Telegram: {r.status_code} - {r.text}")
     except Exception as e:
         print(f"⚠️ Errore Telegram: {e}")
 
 # ================= WANTLIST =================
 def get_wantlist():
     url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
-    r = requests.get(url, auth=auth)
-    r.raise_for_status()
-    return r.json()["wants"]
+    try:
+        r = requests.get(url, auth=auth)
+        r.raise_for_status()
+        return r.json().get("wants", [])
+    except Exception as e:
+        print(f"⚠️ Errore get_wantlist: {e}")
+        return []
 
 # ================= MARKETPLACE =================
 def get_latest_listing(release_id):
@@ -63,35 +86,40 @@ def get_latest_listing(release_id):
         "per_page": 1,
         "page": 1
     }
-    r = requests.get(url, params=params, auth=auth)
-    r.raise_for_status()
-    results = r.json().get("results", [])
-    return results[0] if results else None
-
+    try:
+        r = requests.get(url, params=params, auth=auth)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        return results[0] if results else None
+    except Exception as e:
+        print(f"⚠️ Errore get_latest_listing ({release_id}): {e}")
+        return None
 
 # ================= LOOP PRINCIPALE =================
 def bot_loop():
-   if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET, DISCOGS_USER]):
-    print("❌ ERRORE: una o più variabili mancano!")
-    exit(1)
-
+    send_telegram("🤖 Discogs Wantlist Notifier avviato e operativo!")
+    print("👂 Bot attivo, in ascolto dei nuovi annunci...")
 
     wants = get_wantlist()
 
     while True:
         for w in wants:
-            rid = w["id"]
+            rid = w.get("id")
             listing = get_latest_listing(rid)
             if not listing:
                 continue
 
-            lid = listing["id"]
+            lid = listing.get("id")
+            if lid is None:
+                continue
+
             if last_seen.get(rid) != lid:
                 last_seen[rid] = lid
                 msg = (
                     f"🎵 NUOVO ARTICOLO IN WANTLIST!\n\n"
-                    f"{listing['title']}\n"
-                    f"💰 {listing['price']['value']} {listing['price']['currency']}\n"
+                    f"{listing.get('title', 'N/D')}\n"
+                    f"💰 {listing.get('price', {}).get('value', 'N/D')} "
+                    f"{listing.get('price', {}).get('currency', '')}\n"
                     f"📦 Condizione: {listing.get('condition', 'N/D')}\n"
                     f"🔗 https://www.discogs.com/sell/item/{lid}"
                 )
