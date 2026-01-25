@@ -32,9 +32,8 @@ if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAU
 
 auth = OAuth1(CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET)
 
-CHECK_INTERVAL = 300
-DELAY_BETWEEN_CALLS = 1.2
-last_seen = {}
+CHECK_INTERVAL = 300  # ogni 5 minuti
+last_seen = {}  # release_id -> {"listing_id": id, "price": valore}
 
 # ================= TELEGRAM =================
 def send_telegram(msg):
@@ -80,10 +79,20 @@ def bot_task():
         lid = listing.get("id")
         if lid is None:
             continue
-        if last_seen.get(rid) != lid:
-            last_seen[rid] = lid
-            msg = f"🎵 NUOVO ARTICOLO: {listing.get('title', 'N/D')} 💰 {listing.get('price', {}).get('value', 'N/D')}\nhttps://www.discogs.com/sell/item/{lid}"
+        new_price = listing.get('price', {}).get('value')
+        old = last_seen.get(rid)
+
+        # Nuovo listing
+        if old is None or old['listing_id'] != lid:
+            last_seen[rid] = {"listing_id": lid, "price": new_price}
+            msg = f"🎵 NUOVO ARTICOLO: {listing.get('title', 'N/D')} 💰 {new_price}\nhttps://www.discogs.com/sell/item/{lid}"
             send_telegram(msg)
+        # Prezzo cambiato
+        elif old['price'] != new_price:
+            last_seen[rid]['price'] = new_price
+            msg = f"💰 Prezzo aggiornato: {listing.get('title', 'N/D')} - Nuovo prezzo {new_price}\nhttps://www.discogs.com/sell/item/{lid}"
+            send_telegram(msg)
+
     # Richiama il task ogni CHECK_INTERVAL secondi
     threading.Timer(CHECK_INTERVAL, bot_task).start()
 
