@@ -53,6 +53,8 @@ def get_wantlist():
 
 # ================= MARKETPLACE =================
 def get_latest_listing(release_id):
+    if release_id is None:
+        return None
     url = "https://api.discogs.com/marketplace/search"
     params = {
         "release_id": release_id,
@@ -65,6 +67,7 @@ def get_latest_listing(release_id):
     r.raise_for_status()
     results = r.json().get("results", [])
     return results[0] if results else None
+
 
 # ================= LOOP PRINCIPALE =================
 def bot_loop():
