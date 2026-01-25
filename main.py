@@ -14,7 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
 
-CHECK_INTERVAL = 180  # 3 minuti (sicuro per Discogs)
+CHECK_INTERVAL = 180  # 3 minuti
 
 HEADERS = {
     "User-Agent": "DiscogsWantlistNotifier/1.0",
@@ -40,7 +40,7 @@ def send_telegram(message):
 # ================= DISCOGS =================
 
 def get_latest_wantlist_listings():
-    url = "https://api.discogs.com/marketplace/listings"
+    url = "https://api.discogs.com/marketplace/search"
     params = {
         "want": "true",
         "sort": "listed",
@@ -51,7 +51,7 @@ def get_latest_wantlist_listings():
 
     r = requests.get(url, headers=HEADERS, params=params, timeout=15)
     r.raise_for_status()
-    return r.json().get("listings", [])
+    return r.json().get("results", [])
 
 # ================= MAIN LOOP =================
 
@@ -59,27 +59,29 @@ def bot_loop():
     global last_seen_timestamp
     print("👂 In ascolto dei nuovi annunci Discogs…")
 
+    # messaggio di avvio (ora ARRIVA)
+    send_telegram("🤖 Discogs Wantlist Notifier avviato e operativo!")
+
     while True:
         try:
             listings = get_latest_wantlist_listings()
             new_items = []
 
             for item in listings:
-                posted = int(item["posted"])
+                posted = int(item.get("listed", 0))
 
                 if posted > last_seen_timestamp:
                     new_items.append(item)
 
             if new_items:
-                # aggiorna timestamp al più recente
-                last_seen_timestamp = max(int(i["posted"]) for i in new_items)
+                last_seen_timestamp = max(int(i["listed"]) for i in new_items)
 
                 for l in reversed(new_items):
                     msg = (
                         f"🎵 NUOVO ARTICOLO IN WANTLIST!\n\n"
-                        f"{l['release']['description']}\n"
+                        f"{l['title']}\n"
                         f"💰 Prezzo: {l['price']['value']} {l['price']['currency']}\n"
-                        f"📦 Condizione: {l['condition']}\n"
+                        f"📦 Condizione: {l.get('condition', 'N/D')}\n"
                         f"🔗 https://www.discogs.com/sell/item/{l['id']}"
                     )
                     send_telegram(msg)
