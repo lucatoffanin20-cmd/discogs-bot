@@ -1,136 +1,99 @@
-print("🤖 Bot Discogs avviato! In ascolto (modalità test)…")
+print("🤖 Discogs Wantlist Notifier avviato")
 
-from dotenv import load_dotenv
-load_dotenv()
 import os
-import requests
 import time
-import json
-import threading
-from requests.exceptions import RequestException, HTTPError
+import requests
+from dotenv import load_dotenv
+from requests.exceptions import RequestException
 
-# ===== VARIABILI =====
+# ================= CONFIG =================
+
+load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DISCOGS_USER = os.getenv("DISCOGS_USER") or "tuo_username_discogs"
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
 
-if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCOGS_USER, DISCOGS_USER_TOKEN]):
-    print("⚠️ Alcune variabili non sono impostate correttamente!")
-
-# ===== INTERVALLI =====
-CHECK_INTERVAL = 60        # ogni 1 minuto per test
-DELAY_BETWEEN_CALLS = 1.2
-STATE_FILE = "seen_items.json"
+CHECK_INTERVAL = 180  # 3 minuti (sicuro per Discogs)
 
 HEADERS = {
     "User-Agent": "DiscogsWantlistNotifier/1.0",
     "Authorization": f"Discogs token={DISCOGS_USER_TOKEN}"
 }
 
-# ===== STATO =====
-if os.path.exists(STATE_FILE):
-    with open(STATE_FILE, "r") as f:
-        seen_items = set(json.load(f))
-else:
-    seen_items = set()
+# ================= STATE =================
 
-def save_state():
-    with open(STATE_FILE, "w") as f:
-        json.dump(list(seen_items), f)
+last_seen_timestamp = 0
 
-# ===== TELEGRAM =====
-def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+# ================= TELEGRAM =================
+
+def send_telegram(message):
     try:
-        r = requests.post(
+        requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
             timeout=10
         )
-        r.raise_for_status()
     except RequestException as e:
         print(f"⚠️ Errore Telegram: {e}")
 
-# ===== DISCOGS =====
-def get_wantlist(page=1):
-    url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
-    r = requests.get(url, headers=HEADERS, params={"page": page, "per_page": 100})
+# ================= DISCOGS =================
+
+def get_latest_wantlist_listings():
+    url = "https://api.discogs.com/marketplace/listings"
+    params = {
+        "want": "true",
+        "sort": "listed",
+        "sort_order": "desc",
+        "per_page": 50,
+        "page": 1
+    }
+
+    r = requests.get(url, headers=HEADERS, params=params, timeout=15)
     r.raise_for_status()
-    return r.json()
+    return r.json().get("listings", [])
 
-def check_marketplace(release_id):
-    url = "https://api.discogs.com/marketplace/search"
-    try:
-        r = requests.get(url, headers=HEADERS, params={"release_id": release_id})
-        r.raise_for_status()
-        return r.json().get("results", [])
-    except HTTPError as e:
-        if r.status_code == 404:
-            return []  # silenzia 404
-        elif r.status_code == 429:
-            print("⚠️ Rate limit Discogs, pausa 60s")
-            time.sleep(60)
-            return []
-        else:
-            print(f"⚠️ Errore Discogs ({release_id}): {e}")
-            return []
+# ================= MAIN LOOP =================
 
-# ===== BOT LOOP =====
-def discogs_bot():
-    print("Bot Discogs avviato e in ascolto…")
-    last_ping = time.time()
+def bot_loop():
+    global last_seen_timestamp
+    print("👂 In ascolto dei nuovi annunci Discogs…")
 
     while True:
         try:
-            # Log regolare per Railway Free
-            if time.time() - last_ping > 60:
-                print("⏱ Bot attivo, controllo wantlist…")
-                last_ping = time.time()
+            listings = get_latest_wantlist_listings()
+            new_items = []
 
-            page = 1
-            while True:
-                data = get_wantlist(page)
-                wants = data.get("wants", [])
+            for item in listings:
+                posted = int(item["posted"])
 
-                for item in wants:
-                    release_id = item["id"]
-                    listings = check_marketplace(release_id)
+                if posted > last_seen_timestamp:
+                    new_items.append(item)
 
-                    new_listings = [l for l in listings if str(l["id"]) not in seen_items]
+            if new_items:
+                # aggiorna timestamp al più recente
+                last_seen_timestamp = max(int(i["posted"]) for i in new_items)
 
-                    for l in new_listings:
-                        uid = str(l["id"])
-                        seen_items.add(uid)
-                        save_state()
-                        msg = (
-                            f"🎵 NUOVO ARTICOLO!\n"
-                            f"{l['title']}\n"
-                            f"Prezzo: {l['price']['value']} {l['price']['currency']}\n"
-                            f"https://www.discogs.com/sell/item/{uid}"
-                        )
-                        send_telegram(msg)
-                        print(f"✅ Notifica inviata: {l['title']}")
+                for l in reversed(new_items):
+                    msg = (
+                        f"🎵 NUOVO ARTICOLO IN WANTLIST!\n\n"
+                        f"{l['release']['description']}\n"
+                        f"💰 Prezzo: {l['price']['value']} {l['price']['currency']}\n"
+                        f"📦 Condizione: {l['condition']}\n"
+                        f"🔗 https://www.discogs.com/sell/item/{l['id']}"
+                    )
+                    send_telegram(msg)
+                    print(f"✅ Notifica inviata: {l['id']}")
 
-                    time.sleep(DELAY_BETWEEN_CALLS)
-
-                if page >= data.get("pagination", {}).get("pages", 1):
-                    break
-                page += 1
-
-            time.sleep(CHECK_INTERVAL)
+            else:
+                print("⏱ Nessun nuovo articolo")
 
         except Exception as e:
-            print(f"⚠️ Errore generale: {e}")
-            time.sleep(30)
+            print(f"⚠️ Errore: {e}")
 
-# ===== START =====
+        time.sleep(CHECK_INTERVAL)
+
+# ================= START =================
+
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=discogs_bot, daemon=True).start()
-
-    # Mantieni il worker attivo con log ogni minuto
-    while True:
-        print("⏱ Worker attivo, in attesa del prossimo controllo…")
-        time.sleep(60)
+    bot_loop()
