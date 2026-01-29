@@ -1,14 +1,15 @@
 import os
-import threading
-import requests
-from requests_oauthlib import OAuth1
-from flask import Flask
-from dotenv import load_dotenv
 import time
+import json
+import requests
+from flask import Flask
+from requests_oauthlib import OAuth1
+from threading import Thread
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# ================= VARIABILI =================
+# ===== VARIABILI =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CONSUMER_KEY = os.getenv("CONSUMER_KEY")
@@ -17,135 +18,88 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-if not all([
-    TELEGRAM_TOKEN,
-    TELEGRAM_CHAT_ID,
-    CONSUMER_KEY,
-    CONSUMER_SECRET,
-    OAUTH_TOKEN,
-    OAUTH_TOKEN_SECRET,
-    DISCOGS_USER
-]):
-    print("❌ ERRORE: una o più variabili d'ambiente mancano")
-    exit(1)
+CHECK_INTERVAL = 300
+DATA_FILE = "seen.json"
 
-auth = OAuth1(
-    CONSUMER_KEY,
-    CONSUMER_SECRET,
-    OAUTH_TOKEN,
-    OAUTH_TOKEN_SECRET
-)
+auth = OAuth1(CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET)
 
-CHECK_INTERVAL = 300  # 5 minuti
-last_seen = {}  # chiave: release_id_listing_id -> prezzo
+# ===== STORAGE =====
+if os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "r") as f:
+        seen = json.load(f)
+else:
+    seen = {}
 
-# ================= TELEGRAM =================
+# ===== TELEGRAM =====
 def send_telegram(msg):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg,
-                "disable_web_page_preview": True
-            },
-            timeout=10
-        )
-    except Exception as e:
-        print(f"⚠️ Errore Telegram: {e}")
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+        timeout=10
+    )
 
-# ================= WANTLIST =================
+# ===== WANTLIST =====
 def get_wantlist():
-    url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
-    try:
-        r = requests.get(url, auth=auth, timeout=15)
-        r.raise_for_status()
-        return r.json().get("wants", [])
-    except Exception as e:
-        print(f"⚠️ Errore wantlist: {e}")
-        return []
+    r = requests.get(
+        f"https://api.discogs.com/users/{DISCOGS_USER}/wants",
+        auth=auth,
+        timeout=15
+    )
+    return r.json().get("wants", [])
 
-# ================= MARKETPLACE =================
-def get_latest_listings(release_id, limit=5):
-    url = "https://api.discogs.com/marketplace/search"
+# ===== LISTINGS =====
+def get_listings(release_id):
+    url = f"https://api.discogs.com/marketplace/listings"
     params = {
         "release_id": release_id,
         "sort": "listed",
         "sort_order": "desc",
-        "per_page": limit,
+        "per_page": 10,
         "page": 1
     }
-    try:
-        r = requests.get(url, params=params, auth=auth, timeout=15)
-        if r.status_code == 404:
-            return []
-        r.raise_for_status()
-        return r.json().get("results", [])
-    except Exception as e:
-        print(f"⚠️ Marketplace error ({release_id}): {e}")
-        return []
+    r = requests.get(url, params=params, auth=auth, timeout=15)
+    return r.json().get("listings", [])
 
-# ================= BOT LOOP =================
-def bot_task():
-    print("👂 Controllo nuovi annunci...")
-    wants = get_wantlist()
+# ===== BOT LOOP =====
+def bot_loop():
+    send_telegram("🤖 Bot Discogs avviato e operativo")
+    while True:
+        wants = get_wantlist()
 
-    for w in wants:
-        release_id = w.get("id")
-        if not release_id:
-            continue
+        for w in wants:
+            rid = str(w["id"])
+            if rid not in seen:
+                seen[rid] = []
 
-        listings = get_latest_listings(release_id, limit=5)
+            listings = get_listings(rid)
 
-        for listing in listings:
-            listing_id = listing.get("id")
-            if not listing_id:
-                continue
+            for l in listings:
+                lid = str(l["id"])
+                if lid not in seen[rid]:
+                    seen[rid].append(lid)
 
-            price = listing.get("price", {}).get("value")
-            key = f"{release_id}_{listing_id}"
+                    price = l["price"]["value"]
+                    title = l.get("title", "N/D")
+                    url = f"https://www.discogs.com/sell/item/{lid}"
 
-            old_price = last_seen.get(key)
+                    send_telegram(
+                        f"🎵 NUOVO ARTICOLO\n{title}\n💰 {price}\n{url}"
+                    )
 
-            # Nuovo annuncio
-            if old_price is None:
-                last_seen[key] = price
-                msg = (
-                    f"🎵 NUOVO ANNUNCIO\n"
-                    f"{listing.get('title', 'N/D')}\n"
-                    f"💰 Prezzo: {price}\n"
-                    f"https://www.discogs.com/sell/item/{listing_id}"
-                )
-                send_telegram(msg)
+                    with open(DATA_FILE, "w") as f:
+                        json.dump(seen, f)
 
-            # Cambio prezzo
-            elif old_price != price:
-                last_seen[key] = price
-                msg = (
-                    f"💰 CAMBIO PREZZO\n"
-                    f"{listing.get('title', 'N/D')}\n"
-                    f"Nuovo prezzo: {price}\n"
-                    f"https://www.discogs.com/sell/item/{listing_id}"
-                )
-                send_telegram(msg)
+            time.sleep(1)
 
-        # micro pausa per evitare burst
-        time.sleep(1)
+        time.sleep(CHECK_INTERVAL)
 
-    threading.Timer(CHECK_INTERVAL, bot_task).start()
-
-# ================= FLASK =================
+# ===== FLASK =====
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot Discogs attivo ✅"
-
-@app.route("/ping")
-def ping():
-    return "pong"
+    return "Bot attivo ✅"
 
 if __name__ == "__main__":
-    send_telegram("🤖 Discogs Wantlist Notifier avviato!")
-    bot_task()
+    Thread(target=bot_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
