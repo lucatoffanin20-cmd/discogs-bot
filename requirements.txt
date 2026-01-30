@@ -1,4 +1,3 @@
+discogs-client
 requests
-requests-oauthlib
-python-dotenv
 flask
