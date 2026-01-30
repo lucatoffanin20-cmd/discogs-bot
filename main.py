@@ -1,15 +1,13 @@
 import os
 import time
-import json
 import requests
-from flask import Flask
 from requests_oauthlib import OAuth1
-from threading import Thread
+from flask import Flask
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ===== VARIABILI =====
+# ================= VARIABILI =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CONSUMER_KEY = os.getenv("CONSUMER_KEY")
@@ -18,82 +16,95 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 300
-DATA_FILE = "seen.json"
-
 auth = OAuth1(CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET)
 
-# ===== STORAGE =====
-if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r") as f:
-        seen = json.load(f)
-else:
-    seen = {}
+CHECK_INTERVAL = 180  # 3 minuti
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # secondi
 
-# ===== TELEGRAM =====
+last_seen = {}  # release_id -> listing_id
+
+# ================= TELEGRAM =================
 def send_telegram(msg):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-        timeout=10
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=10
+        )
+    except:
+        pass
 
-# ===== WANTLIST =====
+# ================= REQUEST CON RETRY =================
+def safe_get(url, params=None):
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, params=params, auth=auth, timeout=15)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.HTTPError as e:
+            if r.status_code == 502:
+                print(f"⚠️ 502 Discogs (tentativo {attempt}/{MAX_RETRIES})")
+                time.sleep(RETRY_DELAY)
+            else:
+                raise
+        except Exception as e:
+            print(f"❌ Errore rete: {e}")
+            return None
+    return None
+
+# ================= WANTLIST =================
 def get_wantlist():
-    r = requests.get(
-        f"https://api.discogs.com/users/{DISCOGS_USER}/wants",
-        auth=auth,
-        timeout=15
-    )
+    url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
+    r = safe_get(url)
+    if not r:
+        return []
     return r.json().get("wants", [])
 
-# ===== LISTINGS =====
-def get_listings(release_id):
-    url = f"https://api.discogs.com/marketplace/listings"
+# ================= MARKETPLACE =================
+def get_latest_listing(release_id):
+    url = "https://api.discogs.com/marketplace/search"
     params = {
         "release_id": release_id,
         "sort": "listed",
         "sort_order": "desc",
-        "per_page": 10,
+        "per_page": 1,
         "page": 1
     }
-    r = requests.get(url, params=params, auth=auth, timeout=15)
-    return r.json().get("listings", [])
+    r = safe_get(url, params)
+    if not r:
+        return None
+    results = r.json().get("results", [])
+    return results[0] if results else None
 
-# ===== BOT LOOP =====
+# ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🤖 Bot Discogs avviato e operativo")
+    send_telegram("🤖 Discogs Wantlist Notifier attivo (check ogni 3 min)")
     while True:
+        print("👂 Controllo nuovi annunci...")
         wants = get_wantlist()
 
         for w in wants:
-            rid = str(w["id"])
-            if rid not in seen:
-                seen[rid] = []
+            rid = w.get("id")
+            listing = get_latest_listing(rid)
+            if not listing:
+                continue
 
-            listings = get_listings(rid)
+            lid = listing.get("id")
+            title = listing.get("title", "N/D")
 
-            for l in listings:
-                lid = str(l["id"])
-                if lid not in seen[rid]:
-                    seen[rid].append(lid)
-
-                    price = l["price"]["value"]
-                    title = l.get("title", "N/D")
-                    url = f"https://www.discogs.com/sell/item/{lid}"
-
-                    send_telegram(
-                        f"🎵 NUOVO ARTICOLO\n{title}\n💰 {price}\n{url}"
-                    )
-
-                    with open(DATA_FILE, "w") as f:
-                        json.dump(seen, f)
-
-            time.sleep(1)
+            if last_seen.get(rid) != lid:
+                last_seen[rid] = lid
+                msg = (
+                    f"🎵 NUOVO ARTICOLO:\n"
+                    f"{title}\n"
+                    f"https://www.discogs.com/sell/item/{lid}"
+                )
+                send_telegram(msg)
 
         time.sleep(CHECK_INTERVAL)
 
-# ===== FLASK =====
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -101,5 +112,6 @@ def home():
     return "Bot attivo ✅"
 
 if __name__ == "__main__":
-    Thread(target=bot_loop, daemon=True).start()
+    import threading
+    threading.Thread(target=bot_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
