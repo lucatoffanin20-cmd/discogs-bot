@@ -1,92 +1,117 @@
 import os
 import time
-import requests
+import json
 import threading
+import requests
+import discogs_client
 from flask import Flask
 
 # ================= VARIABILI =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 CONSUMER_KEY = os.getenv("CONSUMER_KEY")
 CONSUMER_SECRET = os.getenv("CONSUMER_SECRET")
 OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-PER_PAGE = 50          # release per pagina wantlist
-CHECK_INTERVAL = 600   # 10 minuti in secondi
+CHECK_INTERVAL = 600  # 10 minuti
+SEEN_FILE = "seen.json"
 
+# ================= FLASK (per Railway) =================
 app = Flask(__name__)
-seen_releases = set()  # memorizza release già notificate
 
-# ================= FUNZIONI =================
+@app.route("/", methods=["HEAD", "GET"])
+def health():
+    return "", 200
+
+# ================= TELEGRAM =================
 def send_telegram(msg):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-    except Exception as e:
-        print(f"⚠️ Errore invio Telegram: {e}")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    requests.post(url, data=data, timeout=10)
 
-def safe_get(url, params=None):
-    for attempt in range(3):
-        try:
-            r = requests.get(url, params=params)
-            if r.status_code == 429:  # rate limit
-                print("⚠️ HTTP 429 ignorato, attendo 5 secondi")
-                time.sleep(5)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except requests.exceptions.HTTPError as e:
-            if r.status_code == 404:
-                # Non esiste nessun annuncio → interrompi retry
-                return None
-            print(f"⚠️ Marketplace error (tentativo {attempt+1}/3): {e}")
-            time.sleep(2)
-        except Exception as e:
-            print(f"⚠️ Errore generico: {e}")
-            time.sleep(2)
-    return None
+# ================= SEEN STORAGE =================
+def load_seen():
+    if os.path.exists(SEEN_FILE):
+        with open(SEEN_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
 
-def get_wantlist(user):
-    releases = []
-    page = 1
-    while True:
-        url = f"https://api.discogs.com/users/{user}/wants"
-        params = {"per_page": PER_PAGE, "page": page}
-        data = safe_get(url, params)
-        if not data or "wants" not in data or not data["wants"]:
-            break
-        releases.extend([w["basic_information"]["id"] for w in data["wants"]])
-        if page >= data.get("pagination", {}).get("pages", 1):
-            break
-        page += 1
-    return releases
+def save_seen(seen):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(list(seen), f)
 
-def check_marketplace(release_id):
-    url = "https://api.discogs.com/marketplace/search"
-    params = {"release_id": release_id, "sort": "listed", "sort_order": "desc", "per_page": 5, "page": 1}
-    data = safe_get(url, params)
-    if data and "results" in data and data["results"]:
-        return True
-    return False
+# ================= DISCOGS CLIENT =================
+def init_discogs():
+    return discogs_client.Client(
+        "WantlistWatcher/1.0",
+        consumer_key=CONSUMER_KEY,
+        consumer_secret=CONSUMER_SECRET,
+        token=OAUTH_TOKEN,
+        secret=OAUTH_TOKEN_SECRET,
+    )
 
+# ================= BOT LOOP =================
 def bot_loop():
-    global seen_releases
+    send_telegram("🤖 Bot Discogs avviato")
+
+    d = init_discogs()
+    user = d.user(DISCOGS_USER)
+
+    try:
+        wantlist = list(user.wantlist)
+        release_ids = [w.release.id for w in wantlist]
+        print(f"📀 Wantlist caricata: {len(release_ids)} release")
+    except Exception as e:
+        print(f"❌ Errore wantlist: {e}")
+        return
+
+    seen = load_seen()
+
     while True:
         print("👂 Controllo nuovi annunci...")
-        wantlist = get_wantlist(DISCOGS_USER)
-        print(f"📀 Wantlist caricata: {len(wantlist)} release")
-        for rid in wantlist:
-            if rid in seen_releases:
-                continue
-            if check_marketplace(rid):
-                send_telegram(f"Nuovo annuncio trovato! Release ID: {rid}")
-                seen_releases.add(rid)
+
+        for rid in release_ids:
+            try:
+                listings = d.search(
+                    release_id=rid,
+                    type="marketplace",
+                    sort="listed",
+                    sort_order="desc",
+                )
+
+                if not listings:
+                    continue
+
+                listing = listings[0]
+                listing_id = str(listing.id)
+
+                if listing_id in seen:
+                    continue
+
+                seen.add(listing_id)
+                save_seen(seen)
+
+                msg = (
+                    f"🆕 Nuovo annuncio Discogs\n\n"
+                    f"📀 {listing.release.title}\n"
+                    f"💰 {listing.price['value']} {listing.price['currency']}\n"
+                    f"🏷 {listing.condition}\n"
+                    f"🔗 {listing.uri}"
+                )
+
+                send_telegram(msg)
+                time.sleep(2)  # anti-spam Telegram
+
+            except Exception as e:
+                print(f"⚠️ Errore release {rid}: {e}")
+                time.sleep(2)
+
         time.sleep(CHECK_INTERVAL)
 
-# ================= AVVIO =================
+# ================= START =================
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
-    send_telegram("🤖 Bot avviato e in esecuzione")
     app.run(host="0.0.0.0", port=8080)
