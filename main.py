@@ -62,7 +62,7 @@ def bot_loop():
 
     try:
         wantlist = list(user.wantlist)
-        release_ids = [w.id for w in wantlist]
+        release_ids = [w.id for w in wantlist]  # ✅ FIX QUI
         print(f"📀 Wantlist caricata: {len(release_ids)} release")
     except Exception as e:
         print(f"❌ Errore wantlist: {e}")
@@ -103,7 +103,7 @@ def bot_loop():
                 )
 
                 send_telegram(msg)
-                time.sleep(2)  # anti-spam Telegram
+                time.sleep(2)
 
             except Exception as e:
                 print(f"⚠️ Errore release {rid}: {e}")
