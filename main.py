@@ -62,7 +62,7 @@ def bot_loop():
 
     try:
         wantlist = list(user.wantlist)
-        release_ids = [w.release.id for w in wantlist]
+        release_ids = [w.id for w in wantlist]
         print(f"📀 Wantlist caricata: {len(release_ids)} release")
     except Exception as e:
         print(f"❌ Errore wantlist: {e}")
