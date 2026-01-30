@@ -54,6 +54,27 @@ def init_discogs():
     )
 
 # ================= BOT LOOP =================
+def get_latest_listing(release_id):
+    url = "https://api.discogs.com/marketplace/search"
+    params = {
+        "release_id": release_id,
+        "sort": "listed",
+        "sort_order": "desc",
+        "per_page": 1,
+        "page": 1,
+    }
+    r = requests.get(url, params=params, timeout=10)
+    if r.status_code != 200:
+        return None
+
+    data = r.json()
+    results = data.get("results", [])
+    if not results:
+        return None
+
+    return results[0]
+
+
 def bot_loop():
     send_telegram("🤖 Bot Discogs avviato")
 
@@ -62,7 +83,7 @@ def bot_loop():
 
     try:
         wantlist = list(user.wantlist)
-        release_ids = [w.id for w in wantlist]  # ✅ FIX QUI
+        release_ids = [w.release.id for w in wantlist]
         print(f"📀 Wantlist caricata: {len(release_ids)} release")
     except Exception as e:
         print(f"❌ Errore wantlist: {e}")
@@ -75,19 +96,11 @@ def bot_loop():
 
         for rid in release_ids:
             try:
-                listings = d.search(
-                    release_id=rid,
-                    type="marketplace",
-                    sort="listed",
-                    sort_order="desc",
-                )
-
-                if not listings:
+                listing = get_latest_listing(rid)
+                if not listing:
                     continue
 
-                listing = listings[0]
-                listing_id = str(listing.id)
-
+                listing_id = str(listing["id"])
                 if listing_id in seen:
                     continue
 
@@ -96,10 +109,10 @@ def bot_loop():
 
                 msg = (
                     f"🆕 Nuovo annuncio Discogs\n\n"
-                    f"📀 {listing.release.title}\n"
-                    f"💰 {listing.price['value']} {listing.price['currency']}\n"
-                    f"🏷 {listing.condition}\n"
-                    f"🔗 {listing.uri}"
+                    f"📀 {listing['title']}\n"
+                    f"💰 {listing['price']['value']} {listing['price']['currency']}\n"
+                    f"🏷 {listing['condition']}\n"
+                    f"🔗 {listing['uri']}"
                 )
 
                 send_telegram(msg)
