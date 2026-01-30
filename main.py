@@ -4,6 +4,7 @@ import requests
 from requests_oauthlib import OAuth1
 from flask import Flask
 from dotenv import load_dotenv
+import threading
 
 load_dotenv()
 
@@ -20,7 +21,7 @@ auth = OAuth1(CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET)
 
 CHECK_INTERVAL = 180  # 3 minuti
 MAX_RETRIES = 3
-RETRY_DELAY = 5  # secondi
+RETRY_DELAY = 5
 
 last_seen = {}  # release_id -> listing_id
 
@@ -35,19 +36,26 @@ def send_telegram(msg):
     except:
         pass
 
-# ================= REQUEST CON RETRY =================
+# ================= REQUEST SICURA =================
 def safe_get(url, params=None):
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = requests.get(url, params=params, auth=auth, timeout=15)
+
+            # 404 = nessun annuncio → NON è un errore
+            if r.status_code == 404:
+                return None
+
             r.raise_for_status()
             return r
-        except requests.exceptions.HTTPError as e:
+
+        except requests.exceptions.HTTPError:
             if r.status_code == 502:
                 print(f"⚠️ 502 Discogs (tentativo {attempt}/{MAX_RETRIES})")
                 time.sleep(RETRY_DELAY)
             else:
-                raise
+                print(f"⚠️ HTTP {r.status_code} ignorato")
+                return None
         except Exception as e:
             print(f"❌ Errore rete: {e}")
             return None
@@ -74,6 +82,7 @@ def get_latest_listing(release_id):
     r = safe_get(url, params)
     if not r:
         return None
+
     results = r.json().get("results", [])
     return results[0] if results else None
 
@@ -112,6 +121,5 @@ def home():
     return "Bot attivo ✅"
 
 if __name__ == "__main__":
-    import threading
     threading.Thread(target=bot_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
