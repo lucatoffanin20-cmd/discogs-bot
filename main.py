@@ -100,15 +100,22 @@ def get_latest_listing(release_id):
         "release_id": release_id,
         "sort": "listed",
         "sort_order": "desc",
-        "per_page": 1,
+        "per_page": 5,   # <-- CRITICO
         "page": 1
     }
+
     r = safe_get(url, params)
     if not r:
         return None
 
     results = r.json().get("results", [])
-    return results[0] if results else None
+    if not results:
+        return None
+
+    # prende davvero il più recente
+    results.sort(key=lambda x: x.get("id", 0), reverse=True)
+    return results[0]
+
 
 # ================= BOT LOOP =================
 def bot_loop():
