@@ -63,11 +63,35 @@ def safe_get(url, params=None):
 
 # ================= WANTLIST =================
 def get_wantlist():
-    url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
-    r = safe_get(url)
-    if not r:
-        return []
-    return r.json().get("wants", [])
+    wants = []
+    page = 1
+
+    while True:
+        url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
+        params = {
+            "page": page,
+            "per_page": 50
+        }
+
+        r = safe_get(url, params)
+        if not r:
+            break
+
+        data = r.json()
+        page_wants = data.get("wants", [])
+        wants.extend(page_wants)
+
+        pagination = data.get("pagination", {})
+        pages = pagination.get("pages", 1)
+
+        if page >= pages:
+            break
+
+        page += 1
+        time.sleep(1)  # anti rate-limit
+
+    print(f"📀 Wantlist caricata: {len(wants)} release")
+    return wants
 
 # ================= MARKETPLACE =================
 def get_latest_listing(release_id):
