@@ -63,7 +63,7 @@ def get_latest_listing(release_id):
         "per_page": 1,
         "page": 1,
     }
-    r = requests.get(url, params=params, timeout=10)
+    r = requests.get(url, params=params, timeout=20)
     if r.status_code != 200:
         return None
 
