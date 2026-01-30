@@ -5,6 +5,7 @@ from requests_oauthlib import OAuth1
 from flask import Flask
 from dotenv import load_dotenv
 import time
+import json
 
 load_dotenv()
 
@@ -32,8 +33,18 @@ if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CONSUMER_KEY, CONSUMER_SECRET, OAU
 
 auth = OAuth1(CONSUMER_KEY, CONSUMER_SECRET, OAUTH_TOKEN, OAUTH_TOKEN_SECRET)
 
-CHECK_INTERVAL = 180  # 3 minuti
-last_seen = {}  # release_id -> {"listing_id": id, "price": valore}
+# ================= CONFIG =================
+CHECK_INTERVAL = 600  # 10 minuti
+WANTLIST_PER_PAGE = 50
+LAST_SEEN_FILE = "last_seen.json"
+REQUEST_DELAY = 0.5  # 0,5 secondi di pausa tra richieste per evitare rate limit
+
+# ================= CARICAMENTO STORICO =================
+if os.path.exists(LAST_SEEN_FILE):
+    with open(LAST_SEEN_FILE, "r") as f:
+        last_seen = json.load(f)
+else:
+    last_seen = {}
 
 # ================= TELEGRAM =================
 def send_telegram(msg):
@@ -44,71 +55,88 @@ def send_telegram(msg):
             timeout=10
         )
     except Exception as e:
-        print(f"⚠️ Errore invio Telegram: {e}")
+        print(f"⚠️ Errore Telegram: {e}")
 
 # ================= WANTLIST =================
-def get_wantlist(retries=3):
-    url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
-    for attempt in range(retries):
+def get_wantlist():
+    wants = []
+    page = 1
+    while True:
+        url = f"https://api.discogs.com/users/{DISCOGS_USER}/wants"
+        params = {"per_page": WANTLIST_PER_PAGE, "page": page}
         try:
-            r = requests.get(url, auth=auth, timeout=10)
-            if r.status_code == 429:
-                print("⚠️ HTTP 429 ignorato, attendo 60s")
-                time.sleep(60)
-                continue
+            r = requests.get(url, auth=auth, params=params, timeout=10)
             r.raise_for_status()
-            return r.json().get("wants", [])
+            data = r.json()
+            page_wants = data.get("wants", [])
+            if not page_wants:
+                break
+            wants.extend(page_wants)
+            if page >= data.get("pagination", {}).get("pages", 0):
+                break
+            page += 1
         except requests.exceptions.RequestException as e:
-            print(f"⚠️ Errore wantlist: {e} (tentativo {attempt+1}/{retries})")
+            print(f"⚠️ Errore wantlist: {e}")
             time.sleep(5)
-    return []
+            continue
+    print(f"📀 Wantlist caricata: {len(wants)} release")
+    return wants
 
 # ================= MARKETPLACE =================
-def get_latest_listing(release_id, retries=3):
-    url = "https://api.discogs.com/marketplace/search"
-    params = {"release_id": release_id, "sort": "listed", "sort_order": "desc", "per_page": 5, "page": 1}
-    for attempt in range(retries):
+def safe_get(url, params=None, max_retries=3):
+    for attempt in range(1, max_retries + 1):
         try:
             r = requests.get(url, params=params, auth=auth, timeout=10)
-            if r.status_code == 429:
-                print("⚠️ HTTP 429 ignorato, attendo 60s")
-                time.sleep(60)
+            if r.status_code == 429:  # rate limit
+                print("⚠️ HTTP 429 ignorato, attendo 5 secondi")
+                time.sleep(5)
                 continue
             r.raise_for_status()
-            results = r.json().get("results", [])
-            return results[0] if results else None
+            return r.json()
+        except requests.exceptions.HTTPError as e:
+            if r.status_code in [502, 503] and attempt < max_retries:
+                print(f"⚠️ Marketplace error (tentativo {attempt}/{max_retries})")
+                time.sleep(5)
+                continue
+            else:
+                print(f"⚠️ Marketplace error (tentativo {attempt}/{max_retries}): {e}")
+                return None
         except requests.exceptions.RequestException as e:
-            print(f"⚠️ Marketplace error (tentativo {attempt+1}/{retries}): {e}")
+            print(f"⚠️ Errore rete: {e}")
             time.sleep(5)
     return None
 
+def get_latest_listing(release_id):
+    url = "https://api.discogs.com/marketplace/search"
+    params = {"release_id": release_id, "sort": "listed", "sort_order": "desc", "per_page": 5, "page": 1}
+    data = safe_get(url, params)
+    results = data.get("results", []) if data else []
+    return results[0] if results else None
+
 # ================= BOT LOOP =================
 def bot_loop():
-    print("👂 Controllo nuovi annunci...")
     wants = get_wantlist()
-    print(f"📀 Wantlist caricata: {len(wants)} release")
     for w in wants:
         rid = w.get("id")
+        if rid is None:
+            continue
         listing = get_latest_listing(rid)
+        time.sleep(REQUEST_DELAY)  # piccolo delay per evitare 429
         if not listing:
             continue
         lid = listing.get("id")
         if lid is None:
             continue
-        new_price = listing.get('price', {}).get('value')
-        old = last_seen.get(rid)
-
         # Nuovo listing
-        if old is None or old['listing_id'] != lid:
-            last_seen[rid] = {"listing_id": lid, "price": new_price}
-            msg = f"🎵 NUOVO ARTICOLO: {listing.get('title', 'N/D')} 💰 {new_price}\nhttps://www.discogs.com/sell/item/{lid}"
+        if str(rid) not in last_seen or last_seen[str(rid)] != lid:
+            last_seen[str(rid)] = lid
+            # Salva lo storico persistente
+            with open(LAST_SEEN_FILE, "w") as f:
+                json.dump(last_seen, f)
+            title = listing.get("title", "N/D")
+            price = listing.get("price", {}).get("value", "N/D")
+            msg = f"🎵 NUOVO ARTICOLO: {title} 💰 {price}\nhttps://www.discogs.com/sell/item/{lid}"
             send_telegram(msg)
-        # Prezzo cambiato
-        elif old['price'] != new_price:
-            last_seen[rid]['price'] = new_price
-            msg = f"💰 Prezzo aggiornato: {listing.get('title', 'N/D')} - Nuovo prezzo {new_price}\nhttps://www.discogs.com/sell/item/{lid}"
-            send_telegram(msg)
-
     threading.Timer(CHECK_INTERVAL, bot_loop).start()
 
 # ================= FLASK =================
