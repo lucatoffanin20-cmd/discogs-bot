@@ -18,6 +18,7 @@ DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
 SEEN_FILE = "seen.json"
+MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare per release
 
 # ================= FLASK (per Railway) =================
 app = Flask(__name__)
@@ -53,28 +54,23 @@ def init_discogs():
         secret=OAUTH_TOKEN_SECRET,
     )
 
-# ================= BOT LOOP =================
-def get_latest_listing(release_id):
+# ================= MARKETPLACE =================
+def get_latest_listings(release_id, limit=5):
     url = "https://api.discogs.com/marketplace/search"
     params = {
         "release_id": release_id,
         "sort": "listed",
         "sort_order": "desc",
-        "per_page": 1,
+        "per_page": limit,
         "page": 1,
     }
     r = requests.get(url, params=params, timeout=20)
     if r.status_code != 200:
-        return None
+        return []
 
-    data = r.json()
-    results = data.get("results", [])
-    if not results:
-        return None
+    return r.json().get("results", [])
 
-    return results[0]
-
-
+# ================= BOT LOOP =================
 def bot_loop():
     send_telegram("🤖 Bot Discogs avviato")
 
@@ -96,27 +92,27 @@ def bot_loop():
 
         for rid in release_ids:
             try:
-                listing = get_latest_listing(rid)
-                if not listing:
-                    continue
+                listings = get_latest_listings(rid, MARKETPLACE_CHECK_LIMIT)
 
-                listing_id = str(listing["id"])
-                if listing_id in seen:
-                    continue
+                for listing in listings:
+                    listing_id = str(listing["id"])
 
-                seen.add(listing_id)
-                save_seen(seen)
+                    if listing_id in seen:
+                        continue
 
-                msg = (
-                    f"🆕 Nuovo annuncio Discogs\n\n"
-                    f"📀 {listing['title']}\n"
-                    f"💰 {listing['price']['value']} {listing['price']['currency']}\n"
-                    f"🏷 {listing['condition']}\n"
-                    f"🔗 {listing['uri']}"
-                )
+                    seen.add(listing_id)
+                    save_seen(seen)
 
-                send_telegram(msg)
-                time.sleep(2)
+                    msg = (
+                        f"🆕 Nuovo annuncio Discogs\n\n"
+                        f"📀 {listing['title']}\n"
+                        f"💰 {listing['price']['value']} {listing['price']['currency']}\n"
+                        f"🏷 {listing['condition']}\n"
+                        f"🔗 {listing['uri']}"
+                    )
+
+                    send_telegram(msg)
+                    time.sleep(2)  # anti-spam Telegram
 
             except Exception as e:
                 print(f"⚠️ Errore release {rid}: {e}")
