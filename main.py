@@ -13,10 +13,12 @@ CONSUMER_KEY = os.getenv("CONSUMER_KEY")
 CONSUMER_SECRET = os.getenv("CONSUMER_SECRET")
 OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
-DISCOGS_USER = os.getenv("DISCOGS_USER")
+
+# Release da testare
+TEST_RELEASE_ID = 7334987  # ← metti qui l'id che vuoi testare
 
 CHECK_INTERVAL = 600  # 10 minuti
-MARKETPLACE_CHECK_LIMIT = 5
+MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci controllare
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -34,7 +36,7 @@ def send_telegram(msg):
 # ================= DISCOGS =================
 def init_discogs():
     return discogs_client.Client(
-        "WantlistWatcherTest/1.0",
+        "WantlistWatcher/1.0",
         consumer_key=CONSUMER_KEY,
         consumer_secret=CONSUMER_SECRET,
         token=OAUTH_TOKEN,
@@ -43,52 +45,46 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 Bot Discogs TEST avviato")
+    send_telegram(f"🤖 Bot Discogs TEST avviato\n📌 Test sulla release: {TEST_RELEASE_ID}")
 
     d = init_discogs()
-    user = d.user(DISCOGS_USER)
-
-    # Stampiamo tutte le release per scegliere quale testare
-    wantlist = list(user.wantlist)
-    print("📀 Wantlist caricata:")
-    for idx, w in enumerate(wantlist):
-        print(f"{idx+1}: {w.release.id} – {w.release.title}")
-
-    # Inserisci qui manualmente l'ID della release da testare
-    release_id = 7334987  # ← METTI L'ID CHE VUOI TESTARE
-    print(f"\n📌 Test sulla release: {release_id}")
 
     while True:
         print("👂 Controllo annunci...")
+
         try:
-            listings = d.search(
+            results = d.search(
                 type="marketplace",
-                release_id=release_id,
+                release_id=TEST_RELEASE_ID,
                 sort="listed",
                 sort_order="desc",
-                per_page=MARKETPLACE_CHECK_LIMIT
+                per_page=MARKETPLACE_CHECK_LIMIT,
             )
 
-            if not listings:
+            if not results:
                 print("⚠️ Nessun annuncio trovato.")
             else:
-                for item in listings:
-                    # Evita errori se non c'è price
-                    if not hasattr(item, "price"):
-                        continue
-                    msg = (
-                        f"🧪 TEST Annuncio Discogs\n\n"
-                        f"📀 {item.title}\n"
-                        f"💰 {item.price.value} {item.price.currency}\n"
-                        f"🏷 {item.condition}\n"
-                        f"🔗 {item.uri}"
-                    )
-                    send_telegram(msg)
-                    print("✅ Annuncio inviato")
+                for idx, item in enumerate(results, 1):
+                    print(f"\n🔎 Listing #{idx}: {item.__dict__}")  # stampa tutti i dati
+
+                    # invio Telegram solo se c'è price e uri
+                    if hasattr(item, "price") and hasattr(item, "uri"):
+                        msg = (
+                            f"🧪 TEST Annuncio Discogs\n\n"
+                            f"📀 {item.title}\n"
+                            f"💰 {item.price.value} {item.price.currency}\n"
+                            f"🏷 {getattr(item, 'condition', 'N/A')}\n"
+                            f"🔗 {item.uri}"
+                        )
+                        send_telegram(msg)
+                        print("✅ Annuncio inviato a Telegram")
+                    else:
+                        print("⚠️ Skipping, attributi price/uri mancanti")
 
         except Exception as e:
             print(f"❌ Marketplace error: {e}")
 
+        # per test rapido mettiamo sleep breve
         time.sleep(CHECK_INTERVAL)
 
 # ================= START =================
