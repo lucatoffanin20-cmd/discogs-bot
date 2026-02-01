@@ -4,8 +4,8 @@ import json
 import threading
 import requests
 import discogs_client
-from flask import Flask
 from datetime import datetime
+from flask import Flask
 
 # ================= VARIABILI =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -18,14 +18,13 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
-MARKETPLACE_CHECK_LIMIT = 5
 SEEN_FILE = "seen.json"
 
-# 🧪 TEST
-TEST_MODE = False            # True = invia solo 1 annuncio e stop
-TEST_ONLY_FIRST_RELEASE = False
+# 🔴 MODALITÀ TEST
+TEST_MODE = True        # ← True per test
+TEST_RELEASE_COUNT = 1   # ← quante release controllare in test
 
-# ================= FLASK (Railway) =================
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -49,7 +48,7 @@ def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen), f)
 
-# ================= DISCOGS CLIENT =================
+# ================= DISCOGS =================
 def init_discogs():
     return discogs_client.Client(
         "WantlistWatcher/1.0",
@@ -59,37 +58,9 @@ def init_discogs():
         secret=OAUTH_TOKEN_SECRET,
     )
 
-# ================= MARKETPLACE (REST PURO) =================
-def get_latest_listings(release_id, limit=5):
-    url = "https://api.discogs.com/marketplace/search"
-    params = {
-        "release_id": release_id,
-        "sort": "listed",
-        "sort_order": "desc",
-        "per_page": limit,
-        "page": 1,
-    }
-
-    headers = {
-        "User-Agent": "WantlistWatcher/1.0",
-        "Authorization": (
-            f'OAuth oauth_consumer_key="{CONSUMER_KEY}", '
-            f'oauth_token="{OAUTH_TOKEN}", '
-            f'oauth_signature_method="PLAINTEXT", '
-            f'oauth_signature="{CONSUMER_SECRET}&{OAUTH_TOKEN_SECRET}"'
-        ),
-    }
-
-    r = requests.get(url, params=params, headers=headers, timeout=20)
-    if r.status_code != 200:
-        print("❌ Marketplace error:", r.status_code)
-        return []
-
-    return r.json().get("results", [])
-
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🤖 Bot Discogs AVVIATO")
+    send_telegram("🤖 Bot Discogs avviato")
 
     d = init_discogs()
     user = d.user(DISCOGS_USER)
@@ -97,48 +68,71 @@ def bot_loop():
     wantlist = list(user.wantlist)
     release_ids = [w.release.id for w in wantlist]
 
+    if TEST_MODE:
+        release_ids = release_ids[:TEST_RELEASE_COUNT]
+        send_telegram(f"🧪 MODALITÀ TEST: {len(release_ids)} release")
+
     print(f"📀 Wantlist caricata: {len(release_ids)} release")
 
     seen = load_seen()
+    today_notified = set()
+    last_summary_day = None
 
     while True:
         print("👂 Controllo nuovi annunci...")
 
-        for idx, rid in enumerate(release_ids):
-
-            if TEST_ONLY_FIRST_RELEASE and idx > 0:
-                break
-
+        for rid in release_ids:
             try:
-                listings = get_latest_listings(rid, MARKETPLACE_CHECK_LIMIT)
+                results = d.search(
+                    type="marketplace",
+                    release_id=rid,
+                    sort="listed",
+                    sort_order="desc",
+                    per_page=5,
+                )
 
-                for l in listings:
-                    listing_id = str(l["id"])
+                for item in results:
+                    if not hasattr(item, "price"):
+                        continue
 
+                    listing_id = str(item.id)
                     if listing_id in seen:
                         continue
 
                     seen.add(listing_id)
+                    today_notified.add(listing_id)
                     save_seen(seen)
 
                     msg = (
                         f"🆕 Nuovo annuncio Discogs\n\n"
-                        f"📀 {l['title']}\n"
-                        f"💰 {l['price']['value']} {l['price']['currency']}\n"
-                        f"🏷 {l['condition']}\n"
-                        f"🔗 {l['uri']}"
+                        f"📀 {item.release.title}\n"
+                        f"💰 {item.price.value} {item.price.currency}\n"
+                        f"🏷 {item.condition}\n"
+                        f"🔗 {item.uri}"
                     )
 
                     send_telegram(msg)
-                    print("✅ Annuncio inviato:", listing_id)
                     time.sleep(2)
 
-                    if TEST_MODE:
-                        return  # 🔴 STOP immediato in test
+                time.sleep(1.2)  # rate limit Discogs
 
             except Exception as e:
                 print(f"⚠️ Errore release {rid}: {e}")
                 time.sleep(2)
+
+        # ===== RIEPILOGO ORE 22 =====
+        now = datetime.now()
+        if now.hour == 22 and last_summary_day != now.date():
+            last_summary_day = now.date()
+
+            if today_notified:
+                send_telegram(
+                    f"📊 Riepilogo giornaliero\n"
+                    f"🆕 Annunci trovati oggi: {len(today_notified)}"
+                )
+                today_notified.clear()
+            else:
+                send_telegram("📊 Riepilogo giornaliero\nNessun nuovo annuncio oggi")
 
         time.sleep(CHECK_INTERVAL)
 
