@@ -1,8 +1,8 @@
 import os
 import time
 import threading
-import discogs_client
 import requests
+import discogs_client
 from flask import Flask
 
 # ================= VARIABILI =================
@@ -16,12 +16,16 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
-MARKETPLACE_CHECK_LIMIT = 20  # annunci da controllare per release
+MARKETPLACE_CHECK_LIMIT = 5
 
-# ================= FLASK (Railway) =================
+# 🔴 MODALITÀ TEST
+TEST_MODE = True   # ← metti False quando hai finito i test
+TEST_ONLY_FIRST_RELEASE = True  # ← testa UNA sola release
+
+# ================= FLASK (Railway healthcheck) =================
 app = Flask(__name__)
 
-@app.route("/", methods=["HEAD", "GET"])
+@app.route("/", methods=["GET", "HEAD"])
 def health():
     return "", 200
 
@@ -43,7 +47,7 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 Bot Discogs TEST (OAuth marketplace)")
+    send_telegram("🧪 Bot Discogs AVVIATO (marketplace OAuth)")
 
     d = init_discogs()
     user = d.user(DISCOGS_USER)
@@ -54,11 +58,17 @@ def bot_loop():
     print(f"📀 Wantlist caricata: {len(release_ids)} release")
 
     while True:
-        print("👂 TEST – Controllo annunci...")
+        print("👂 Controllo annunci marketplace...")
 
-        for rid in release_ids:
+        for idx, rid in enumerate(release_ids):
+
+            # 🧪 TEST: una sola release
+            if TEST_MODE and TEST_ONLY_FIRST_RELEASE and idx > 0:
+                break
+
             try:
-                results = d.marketplace.search(
+                results = d.search(
+                    type="marketplace",
                     release_id=rid,
                     sort="listed",
                     sort_order="desc",
@@ -68,13 +78,17 @@ def bot_loop():
                 for listing in results:
                     msg = (
                         f"🧪 TEST Annuncio Discogs\n\n"
-                        f"📀 {listing.release.title}\n"
+                        f"📀 {listing.title}\n"
                         f"💰 {listing.price.value} {listing.price.currency}\n"
                         f"🏷 {listing.condition}\n"
                         f"🔗 {listing.uri}"
                     )
                     send_telegram(msg)
-                    time.sleep(1)
+
+                    # UNA notifica per release (fondamentale)
+                    break
+
+                time.sleep(1)
 
             except Exception as e:
                 print(f"⚠️ Errore release {rid}: {e}")
