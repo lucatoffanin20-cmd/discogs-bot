@@ -47,7 +47,7 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 Bot Discogs AVVIATO (marketplace OAuth)")
+    send_telegram("🧪 Bot Discogs AVVIATO (test marketplace)")
 
     d = init_discogs()
     user = d.user(DISCOGS_USER)
@@ -58,12 +58,12 @@ def bot_loop():
     print(f"📀 Wantlist caricata: {len(release_ids)} release")
 
     while True:
-        print("👂 Controllo annunci marketplace...")
+        print("👂 TEST – Controllo annunci...")
 
         for idx, rid in enumerate(release_ids):
 
-            # 🧪 TEST: una sola release
-            if TEST_MODE and TEST_ONLY_FIRST_RELEASE and idx > 0:
+            # TEST: controlla SOLO la prima release
+            if idx > 0:
                 break
 
             try:
@@ -72,29 +72,33 @@ def bot_loop():
                     release_id=rid,
                     sort="listed",
                     sort_order="desc",
-                    per_page=MARKETPLACE_CHECK_LIMIT,
+                    per_page=5,
                 )
 
-                for listing in results:
+                print(f"🔎 Release {rid}: {len(results)} risultati")
+
+                for item in results:
+                    # 🔒 FILTRO VITALE
+                    if not hasattr(item, "price"):
+                        continue
+
                     msg = (
                         f"🧪 TEST Annuncio Discogs\n\n"
-                        f"📀 {listing.title}\n"
-                        f"💰 {listing.price.value} {listing.price.currency}\n"
-                        f"🏷 {listing.condition}\n"
-                        f"🔗 {listing.uri}"
+                        f"📀 {item.title}\n"
+                        f"💰 {item.price.value} {item.price.currency}\n"
+                        f"🏷 {item.condition}\n"
+                        f"🔗 {item.uri}"
                     )
+
                     send_telegram(msg)
-
-                    # UNA notifica per release (fondamentale)
-                    break
-
-                time.sleep(1)
+                    print("✅ Annuncio inviato")
+                    return  # 🔴 STOP DOPO IL PRIMO (test)
 
             except Exception as e:
                 print(f"⚠️ Errore release {rid}: {e}")
-                time.sleep(2)
 
         time.sleep(CHECK_INTERVAL)
+        
 
 # ================= START =================
 if __name__ == "__main__":
