@@ -16,13 +16,13 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
-MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare
+MARKETPLACE_CHECK_LIMIT = 5
 
 # 🔴 MODALITÀ TEST
-TEST_MODE = True   # True per test, False per script finale
-TEST_RELEASES = [368616]  # ID delle release da testare
+TEST_MODE = True
+TEST_RELEASES = [7334987, 1502804]  # ID release da testare
 
-# ================= FLASK (healthcheck Railway) =================
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -47,23 +47,12 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 BOT TEST – controllo listing.data")
+    send_telegram("🧪 BOT TEST – controllo listing.data robusto")
 
     d = init_discogs()
-    user = d.user(DISCOGS_USER)
+    release_ids = TEST_RELEASES if TEST_MODE else []
 
-    if TEST_MODE:
-        release_ids = TEST_RELEASES
-        print(f"📀 Modalità TEST attiva. Controllo release: {release_ids}")
-    else:
-        try:
-            wantlist = list(user.wantlist)
-            release_ids = [w.release.id for w in wantlist]
-            print(f"📀 Wantlist caricata: {len(release_ids)} release")
-        except Exception as e:
-            print(f"❌ Errore fetching wantlist: {e}")
-            send_telegram(f"❌ Errore fetching wantlist: {e}")
-            return
+    print(f"📀 Controllo release: {release_ids}")
 
     while True:
         print("👂 Controllo annunci...")
@@ -79,37 +68,34 @@ def bot_loop():
                 )
 
                 if not results:
-                    print(f"⚠️ Nessun annuncio trovato per release {rid}.")
+                    print(f"⚠️ Nessun annuncio trovato per release {rid}")
                     continue
 
                 for idx, listing in enumerate(results, start=1):
-                    # 🔑 Preleviamo dati direttamente da listing.data
                     data = getattr(listing, 'data', {})
+                    title = data.get('title', 'N/D')
+                    uri = data.get('uri') or data.get('resource_url', 'N/D')
                     price_data = data.get('price')
-                    uri = data.get('uri')
-                    title = data.get('title')
-                    condition = getattr(listing, 'condition', 'N/A')
-
-                    if not price_data or not uri:
-                        print(f"⚠️ Skipping listing #{idx} release {rid}, price/uri mancanti.")
-                        continue
+                    price_str = f"{price_data['value']} {price_data['currency']}" if price_data else "Prezzo N/D"
+                    condition = getattr(listing, 'condition', 'N/D')
 
                     msg = (
                         f"🧪 TEST Annuncio Discogs\n\n"
                         f"📀 {title}\n"
-                        f"💰 {price_data['value']} {price_data['currency']}\n"
+                        f"💰 {price_str}\n"
                         f"🏷 {condition}\n"
-                        f"🔗 {uri}"
+                        f"🔗 https://www.discogs.com{uri}"
                     )
 
                     send_telegram(msg)
                     print(f"✅ Listing #{idx} inviato per release {rid}")
-                    return  # 🔴 STOP dopo il primo listing trovato per test
+                    return  # STOP dopo il primo listing trovato per test
 
             except Exception as e:
                 print(f"❌ Marketplace error release {rid}: {e}")
 
         time.sleep(CHECK_INTERVAL)
+
 
 # ================= START =================
 if __name__ == "__main__":
