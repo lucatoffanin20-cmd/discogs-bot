@@ -63,22 +63,18 @@ def bot_loop():
     send_telegram("🤖 Bot Discogs avviato")
 
     d = init_discogs()
+    user = d.user(DISCOGS_USER)
 
-    if TEST_MODE:
-        release_ids = TEST_RELEASES
-        print(f"📀 Modalità TEST attiva. Release da controllare: {release_ids}")
-    else:
-        try:
-            user = d.user(DISCOGS_USER)
-            wantlist = list(user.wantlist)
-            release_ids = [w.release.id for w in wantlist]
-            print(f"📀 Wantlist caricata: {len(release_ids)} release")
-        except Exception as e:
-            print(f"❌ Errore fetching wantlist: {e}")
-            send_telegram(f"❌ Errore fetching wantlist: {e}")
-            return
+    try:
+        wantlist = list(user.wantlist)
+        release_ids = [w.release.id for w in wantlist]
+        print(f"📀 Wantlist caricata: {len(release_ids)} release")
+    except Exception as e:
+        print(f"❌ Errore fetching wantlist: {e}")
+        send_telegram(f"❌ Errore fetching wantlist: {e}")
+        return
 
-    seen = load_seen()
+    seen = set()  # gestione annunci già visti
 
     while True:
         print("👂 Controllo nuovi annunci...")
@@ -93,21 +89,9 @@ def bot_loop():
                     per_page=MARKETPLACE_CHECK_LIMIT,
                 )
 
-                if not results:
-                    continue
-
-                for listing in results:
-                    # 🔑 Prendo prezzo e URI da listing, fallback a listing.data
-                    price = getattr(listing, "price", None)
-                    uri = getattr(listing, "uri", None)
-                    if not price or not uri:
-                        # fallback a listing.data
-                        data = getattr(listing, "data", {})
-                        if "community" in data:
-                            uri = data.get("resource_url")  # link release
-                        price = data.get("price", None)
-
-                    # Se non ci sono ancora, salto
+                for idx, listing in enumerate(results, start=1):
+                    price = getattr(listing, 'price', None)
+                    uri = getattr(listing, 'uri', None)
                     if not price or not uri:
                         continue
 
@@ -116,8 +100,6 @@ def bot_loop():
                         continue
 
                     seen.add(listing_id)
-                    save_seen(seen)
-
                     msg = (
                         f"🆕 Nuovo annuncio Discogs\n\n"
                         f"📀 {listing.title}\n"
@@ -126,13 +108,22 @@ def bot_loop():
                         f"🔗 {uri}"
                     )
                     send_telegram(msg)
-                    print(f"✅ Inviato annuncio release {rid}, listing {listing_id}")
+                    time.sleep(2)  # pausa tra notifiche per Telegram
 
+                time.sleep(1)  # pausa tra le release per rispettare il rate limit
+
+            except discogs_client.exceptions.HTTPError as e:
+                if "429" in str(e):
+                    print(f"⚠️ Troppe richieste, aspetto 60 secondi...")
+                    time.sleep(60)
+                else:
+                    print(f"❌ Marketplace error release {rid}: {e}")
             except Exception as e:
-                print(f"❌ Marketplace error release {rid}: {e}")
-                time.sleep(2)
+                print(f"❌ Errore release {rid}: {e}")
 
+        print(f"⏱ Pausa {CHECK_INTERVAL} secondi prima del prossimo controllo")
         time.sleep(CHECK_INTERVAL)
+
 
 # ================= START =================
 if __name__ == "__main__":
