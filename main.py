@@ -13,12 +13,11 @@ CONSUMER_KEY = os.getenv("CONSUMER_KEY")
 CONSUMER_SECRET = os.getenv("CONSUMER_SECRET")
 OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
-
-# Release da testare
-TEST_RELEASE_ID = 7334987  # ← metti qui l'id che vuoi testare
+DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
-MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci controllare
+MARKETPLACE_CHECK_LIMIT = 5
+TEST_RELEASE_ID = 7334987  # ← qui metti l'ID della release da testare
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -45,12 +44,12 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram(f"🤖 Bot Discogs TEST avviato\n📌 Test sulla release: {TEST_RELEASE_ID}")
+    send_telegram(f"🧪 Bot Discogs TEST avviato – release {TEST_RELEASE_ID}")
 
     d = init_discogs()
 
     while True:
-        print("👂 Controllo annunci...")
+        print(f"👂 TEST – Controllo annunci release {TEST_RELEASE_ID}...")
 
         try:
             results = d.search(
@@ -64,28 +63,30 @@ def bot_loop():
             if not results:
                 print("⚠️ Nessun annuncio trovato.")
             else:
-                for idx, item in enumerate(results, 1):
-                    print(f"\n🔎 Listing #{idx}: {item.__dict__}")  # stampa tutti i dati
+                for idx, listing in enumerate(results):
+                    data = listing.data
+                    price_info = data.get("price")
+                    uri = data.get("uri") or data.get("resource_url")
 
-                    # invio Telegram solo se c'è price e uri
-                    if hasattr(item, "price") and hasattr(item, "uri"):
-                        msg = (
-                            f"🧪 TEST Annuncio Discogs\n\n"
-                            f"📀 {item.title}\n"
-                            f"💰 {item.price.value} {item.price.currency}\n"
-                            f"🏷 {getattr(item, 'condition', 'N/A')}\n"
-                            f"🔗 {item.uri}"
-                        )
-                        send_telegram(msg)
-                        print("✅ Annuncio inviato a Telegram")
-                    else:
-                        print("⚠️ Skipping, attributi price/uri mancanti")
+                    if not price_info or not uri:
+                        print(f"⚠️ Skipping listing #{idx+1}, price/uri mancanti")
+                        continue
+
+                    msg = (
+                        f"🧪 TEST Annuncio Discogs\n\n"
+                        f"📀 {data.get('title')}\n"
+                        f"💰 {price_info.get('value')} {price_info.get('currency')}\n"
+                        f"🏷 {data.get('condition')}\n"
+                        f"🔗 https://www.discogs.com{uri}"
+                    )
+                    send_telegram(msg)
+                    print("✅ Annuncio inviato")
 
         except Exception as e:
             print(f"❌ Marketplace error: {e}")
 
-        # per test rapido mettiamo sleep breve
         time.sleep(CHECK_INTERVAL)
+
 
 # ================= START =================
 if __name__ == "__main__":
