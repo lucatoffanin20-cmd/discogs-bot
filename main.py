@@ -8,11 +8,15 @@ from flask import Flask
 # ================= VARIABILI =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+CONSUMER_KEY = os.getenv("CONSUMER_KEY")
+CONSUMER_SECRET = os.getenv("CONSUMER_SECRET")
+OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
+OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
-DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN")  # personal access token
 
 CHECK_INTERVAL = 600  # 10 minuti
-MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare
+MARKETPLACE_CHECK_LIMIT = 5
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -30,66 +34,60 @@ def send_telegram(msg):
 # ================= DISCOGS =================
 def init_discogs():
     return discogs_client.Client(
-        "WantlistWatcher/1.0",
-        user_token=DISCOGS_TOKEN
+        "WantlistWatcherTest/1.0",
+        consumer_key=CONSUMER_KEY,
+        consumer_secret=CONSUMER_SECRET,
+        token=OAUTH_TOKEN,
+        secret=OAUTH_TOKEN_SECRET,
     )
-
-# ================= MARKETPLACE =================
-def get_latest_listings(release_id, limit=MARKETPLACE_CHECK_LIMIT):
-    url = "https://api.discogs.com/marketplace/search"
-    params = {
-        "release_id": release_id,
-        "sort": "listed",
-        "sort_order": "desc",
-        "per_page": limit,
-        "page": 1
-    }
-    headers = {"Authorization": f"Discogs token={DISCOGS_TOKEN}"}
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=20)
-        if r.status_code != 200:
-            print(f"❌ Marketplace error: {r.status_code}")
-            return []
-        return r.json().get("results", [])
-    except Exception as e:
-        print(f"❌ Errore fetching marketplace: {e}")
-        return []
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 Bot Discogs TEST: controllo 1 release")
+    send_telegram("🧪 Bot Discogs TEST avviato")
 
     d = init_discogs()
-    try:
-        user = d.user(DISCOGS_USER)
-        wantlist = list(user.wantlist)
-        if not wantlist:
-            print("❌ Wantlist vuota")
-            return
-    except Exception as e:
-        print(f"❌ Errore fetching wantlist: {e}")
-        return
+    user = d.user(DISCOGS_USER)
 
-    release_id = wantlist[0].release.id  # TEST: prima release
-    print(f"📀 Test sulla release: {release_id}")
+    # Stampiamo tutte le release per scegliere quale testare
+    wantlist = list(user.wantlist)
+    print("📀 Wantlist caricata:")
+    for idx, w in enumerate(wantlist):
+        print(f"{idx+1}: {w.release.id} – {w.release.title}")
+
+    # Inserisci qui manualmente l'ID della release da testare
+    release_id = 7334987  # ← METTI L'ID CHE VUOI TESTARE
+    print(f"\n📌 Test sulla release: {release_id}")
 
     while True:
         print("👂 Controllo annunci...")
-
-        listings = get_latest_listings(release_id)
-        if not listings:
-            print("⚠️ Nessun annuncio trovato")
-        for item in listings:
-            msg = (
-                f"🧪 TEST Annuncio Discogs\n\n"
-                f"📀 {item['title']}\n"
-                f"💰 {item['price']['value']} {item['price']['currency']}\n"
-                f"🏷 {item['condition']}\n"
-                f"🔗 {item['uri']}"
+        try:
+            listings = d.search(
+                type="marketplace",
+                release_id=release_id,
+                sort="listed",
+                sort_order="desc",
+                per_page=MARKETPLACE_CHECK_LIMIT
             )
-            send_telegram(msg)
-            print("✅ Messaggio inviato")
-            time.sleep(1)
+
+            if not listings:
+                print("⚠️ Nessun annuncio trovato.")
+            else:
+                for item in listings:
+                    # Evita errori se non c'è price
+                    if not hasattr(item, "price"):
+                        continue
+                    msg = (
+                        f"🧪 TEST Annuncio Discogs\n\n"
+                        f"📀 {item.title}\n"
+                        f"💰 {item.price.value} {item.price.currency}\n"
+                        f"🏷 {item.condition}\n"
+                        f"🔗 {item.uri}"
+                    )
+                    send_telegram(msg)
+                    print("✅ Annuncio inviato")
+
+        except Exception as e:
+            print(f"❌ Marketplace error: {e}")
 
         time.sleep(CHECK_INTERVAL)
 
