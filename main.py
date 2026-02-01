@@ -17,7 +17,7 @@ DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
 MARKETPLACE_CHECK_LIMIT = 5
-TEST_RELEASE_ID = r7334987  # ← qui metti l'ID della release da testare
+TEST_RELEASE_ID = 1502804  # ← qui metti l'ID della release da testare
 
 # ================= FLASK =================
 app = Flask(__name__)
