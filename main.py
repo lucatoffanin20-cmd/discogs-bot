@@ -3,6 +3,7 @@ import time
 import threading
 import requests
 import discogs_client
+from flask import Flask
 
 # ================= VARIABILI =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -15,7 +16,18 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
-MARKETPLACE_CHECK_LIMIT = 5
+MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare
+
+# 🔴 MODALITÀ TEST
+TEST_MODE = True   # True per test, False per script finale
+TEST_RELEASES = [7334987, 1502804]  # Metti qui gli ID delle release da testare
+
+# ================= FLASK (healthcheck Railway) =================
+app = Flask(__name__)
+
+@app.route("/", methods=["GET", "HEAD"])
+def health():
+    return "", 200
 
 # ================= TELEGRAM =================
 def send_telegram(msg):
@@ -40,10 +52,19 @@ def bot_loop():
     d = init_discogs()
     user = d.user(DISCOGS_USER)
 
-    # Inserisci qui l'ID della release da testare
-    release_ids = [7334987]  # esempio: Sing For Absolution
+    if TEST_MODE:
+        release_ids = TEST_RELEASES
+        print(f"📀 Modalità TEST attiva. Controllo release: {release_ids}")
+    else:
+        try:
+            wantlist = list(user.wantlist)
+            release_ids = [w.release.id for w in wantlist]
+            print(f"📀 Wantlist caricata: {len(release_ids)} release")
+        except Exception as e:
+            print(f"❌ Errore fetching wantlist: {e}")
+            send_telegram(f"❌ Errore fetching wantlist: {e}")
+            return
 
-    print(f"📀 Test sulla release: {release_ids[0]}")
     while True:
         print("👂 Controllo annunci...")
 
@@ -56,17 +77,18 @@ def bot_loop():
                     sort_order="desc",
                     per_page=MARKETPLACE_CHECK_LIMIT,
                 )
+
                 if not results:
-                    print("⚠️ Nessun annuncio trovato.")
+                    print(f"⚠️ Nessun annuncio trovato per release {rid}.")
                     continue
 
                 for idx, listing in enumerate(results, start=1):
                     data = listing.data
                     price_info = data.get("price")
                     uri = data.get("uri") or data.get("resource_url")
-                    
+
                     if not price_info or not uri:
-                        print(f"⚠️ Skipping listing #{idx}, price/uri mancanti.")
+                        print(f"⚠️ Skipping listing #{idx} release {rid}, price/uri mancanti.")
                         continue
 
                     msg = (
@@ -74,17 +96,19 @@ def bot_loop():
                         f"📀 {data.get('title')}\n"
                         f"💰 {price_info.get('value')} {price_info.get('currency')}\n"
                         f"🏷 {data.get('condition', 'N/A')}\n"
-                        f"🔗 https://www.discogs.com{uri}"  # link completo
+                        f"🔗 https://www.discogs.com{uri}"
                     )
+
                     send_telegram(msg)
-                    print(f"✅ Listing #{idx} inviato")
-                    return  # stop dopo il primo listing per il test
+                    print(f"✅ Listing #{idx} inviato per release {rid}")
+                    return  # 🔴 STOP dopo il primo listing trovato
 
             except Exception as e:
-                print(f"❌ Marketplace error: {e}")
+                print(f"❌ Marketplace error release {rid}: {e}")
 
         time.sleep(CHECK_INTERVAL)
 
 # ================= START =================
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
+    app.run(host="0.0.0.0", port=8080)
