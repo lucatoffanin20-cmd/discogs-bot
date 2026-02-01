@@ -47,7 +47,7 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 BOT TEST – controllo listing.price/uri corretti")
+    send_telegram("🧪 BOT TEST – controllo listing.data")
 
     d = init_discogs()
     user = d.user(DISCOGS_USER)
@@ -83,25 +83,28 @@ def bot_loop():
                     continue
 
                 for idx, listing in enumerate(results, start=1):
-                    # 🔑 Prezzo e URI presi direttamente dal listing, non da listing.data
-                    price = getattr(listing, 'price', None)
-                    uri = getattr(listing, 'uri', None)
+                    # 🔑 Preleviamo dati direttamente da listing.data
+                    data = getattr(listing, 'data', {})
+                    price_data = data.get('price')
+                    uri = data.get('uri')
+                    title = data.get('title')
+                    condition = getattr(listing, 'condition', 'N/A')
 
-                    if not price or not uri:
+                    if not price_data or not uri:
                         print(f"⚠️ Skipping listing #{idx} release {rid}, price/uri mancanti.")
                         continue
 
                     msg = (
                         f"🧪 TEST Annuncio Discogs\n\n"
-                        f"📀 {listing.title}\n"
-                        f"💰 {price.value} {price.currency}\n"
-                        f"🏷 {listing.condition}\n"
+                        f"📀 {title}\n"
+                        f"💰 {price_data['value']} {price_data['currency']}\n"
+                        f"🏷 {condition}\n"
                         f"🔗 {uri}"
                     )
 
                     send_telegram(msg)
                     print(f"✅ Listing #{idx} inviato per release {rid}")
-                    return  # 🔴 STOP dopo il primo listing trovato
+                    return  # 🔴 STOP dopo il primo listing trovato per test
 
             except Exception as e:
                 print(f"❌ Marketplace error release {rid}: {e}")
