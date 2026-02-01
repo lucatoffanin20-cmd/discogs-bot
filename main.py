@@ -20,7 +20,7 @@ MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare
 
 # 🔴 MODALITÀ TEST
 TEST_MODE = True   # True per test, False per script finale
-TEST_RELEASES = [7334987, 1502804]  # ID delle release da testare
+TEST_RELEASES = [368616]  # ID delle release da testare
 
 # ================= FLASK (healthcheck Railway) =================
 app = Flask(__name__)
