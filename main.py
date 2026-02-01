@@ -1,10 +1,8 @@
 import os
 import time
-import json
 import threading
 import requests
 import discogs_client
-from datetime import datetime
 from flask import Flask
 
 # ================= VARIABILI =================
@@ -18,13 +16,13 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 600  # 10 minuti
-SEEN_FILE = "seen.json"
+MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare per release
 
 # 🔴 MODALITÀ TEST
-TEST_MODE = True        # ← True per test
-TEST_RELEASE_COUNT = 1   # ← quante release controllare in test
+TEST_MODE = True   # ← metti False quando finisci i test
+TEST_ONLY_FIRST_RELEASE = True  # ← controlla UNA sola release
 
-# ================= FLASK =================
+# ================= FLASK (Railway healthcheck) =================
 app = Flask(__name__)
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -36,17 +34,6 @@ def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     requests.post(url, data=data, timeout=10)
-
-# ================= SEEN =================
-def load_seen():
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
 
 # ================= DISCOGS =================
 def init_discogs():
@@ -60,7 +47,7 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🤖 Bot Discogs avviato")
+    send_telegram("🤖 Bot Discogs AVVIATO (modalità test)")
 
     d = init_discogs()
     user = d.user(DISCOGS_USER)
@@ -68,18 +55,14 @@ def bot_loop():
     wantlist = list(user.wantlist)
     release_ids = [w.release.id for w in wantlist]
 
-    if TEST_MODE:
-        release_ids = release_ids[:TEST_RELEASE_COUNT]
-        send_telegram(f"🧪 MODALITÀ TEST: {len(release_ids)} release")
+    # Se in test, controlla solo la prima release
+    if TEST_MODE and TEST_ONLY_FIRST_RELEASE:
+        release_ids = release_ids[:1]
 
-    print(f"📀 Wantlist caricata: {len(release_ids)} release")
-
-    seen = load_seen()
-    today_notified = set()
-    last_summary_day = None
+    send_telegram(f"🧪 MODALITÀ TEST: {len(release_ids)} release")
 
     while True:
-        print("👂 Controllo nuovi annunci...")
+        print("👂 TEST – Controllo annunci...")
 
         for rid in release_ids:
             try:
@@ -88,51 +71,33 @@ def bot_loop():
                     release_id=rid,
                     sort="listed",
                     sort_order="desc",
-                    per_page=5,
+                    per_page=MARKETPLACE_CHECK_LIMIT,
                 )
 
-                for item in results:
-                    if not hasattr(item, "price"):
-                        continue
+                if results:
+                    for item in results:
+                        # 🔒 Controllo che esista l'attributo price
+                        if not hasattr(item, "price"):
+                            continue
 
-                    listing_id = str(item.id)
-                    if listing_id in seen:
-                        continue
+                        msg = (
+                            f"🧪 TEST Annuncio Discogs\n\n"
+                            f"📀 {item.title}\n"
+                            f"💰 {item.price.value} {item.price.currency}\n"
+                            f"🏷 {item.condition}\n"
+                            f"🔗 {item.uri}"
+                        )
+                        send_telegram(msg)
+                        print("✅ Annuncio inviato")
+                        return  # STOP DOPO IL PRIMO ANNUNCIO (test)
 
-                    seen.add(listing_id)
-                    today_notified.add(listing_id)
-                    save_seen(seen)
-
-                    msg = (
-                        f"🆕 Nuovo annuncio Discogs\n\n"
-                        f"📀 {item.release.title}\n"
-                        f"💰 {item.price.value} {item.price.currency}\n"
-                        f"🏷 {item.condition}\n"
-                        f"🔗 {item.uri}"
-                    )
-
-                    send_telegram(msg)
-                    time.sleep(2)
-
-                time.sleep(1.2)  # rate limit Discogs
+                else:
+                    # 🔔 Messaggio se non ci sono annunci
+                    send_telegram(f"ℹ️ Nessun annuncio trovato per la release {rid}")
+                    print(f"ℹ️ Nessun annuncio per release {rid}")
 
             except Exception as e:
                 print(f"⚠️ Errore release {rid}: {e}")
-                time.sleep(2)
-
-        # ===== RIEPILOGO ORE 22 =====
-        now = datetime.now()
-        if now.hour == 22 and last_summary_day != now.date():
-            last_summary_day = now.date()
-
-            if today_notified:
-                send_telegram(
-                    f"📊 Riepilogo giornaliero\n"
-                    f"🆕 Annunci trovati oggi: {len(today_notified)}"
-                )
-                today_notified.clear()
-            else:
-                send_telegram("📊 Riepilogo giornaliero\nNessun nuovo annuncio oggi")
 
         time.sleep(CHECK_INTERVAL)
 
