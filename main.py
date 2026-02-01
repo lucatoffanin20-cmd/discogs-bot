@@ -1,11 +1,10 @@
 import os
 import time
-import json
 import threading
+import json
 import requests
 import discogs_client
 from flask import Flask
-from datetime import datetime
 
 # ================= VARIABILI =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -17,10 +16,13 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 600  # 10 minuti
+CHECK_INTERVAL = 60  # 1 minuto per notifiche veloci
 SEEN_FILE = "seen.json"
-MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare
-DAILY_REPORT_HOUR = 22  # ora in cui inviare il riepilogo giornaliero
+MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
+
+# 🔴 MODALITÀ TEST
+TEST_MODE = False
+TEST_RELEASES = [7334987, 1502804]  # inserisci ID release per test
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -33,10 +35,7 @@ def health():
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-    try:
-        requests.post(url, data=data, timeout=10)
-    except Exception as e:
-        print(f"❌ Errore invio Telegram: {e}")
+    requests.post(url, data=data, timeout=10)
 
 # ================= SEEN STORAGE =================
 def load_seen():
@@ -52,7 +51,7 @@ def save_seen(seen):
 # ================= DISCOGS =================
 def init_discogs():
     return discogs_client.Client(
-        "WantlistWatcher/1.0",
+        "WantlistNotifier/1.0",
         consumer_key=CONSUMER_KEY,
         consumer_secret=CONSUMER_SECRET,
         token=OAUTH_TOKEN,
@@ -64,21 +63,26 @@ def bot_loop():
     send_telegram("🤖 Bot Discogs avviato")
 
     d = init_discogs()
-    try:
-        user = d.user(DISCOGS_USER)
-        wantlist = list(user.wantlist)
-        release_ids = [w.release.id for w in wantlist]
-        print(f"📀 Wantlist caricata: {len(release_ids)} release")
-    except Exception as e:
-        print(f"❌ Errore fetching wantlist: {e}")
-        send_telegram(f"❌ Errore fetching wantlist: {e}")
-        return
+
+    if TEST_MODE:
+        release_ids = TEST_RELEASES
+        print(f"📀 Modalità TEST attiva. Release da controllare: {release_ids}")
+    else:
+        try:
+            user = d.user(DISCOGS_USER)
+            wantlist = list(user.wantlist)
+            release_ids = [w.release.id for w in wantlist]
+            print(f"📀 Wantlist caricata: {len(release_ids)} release")
+        except Exception as e:
+            print(f"❌ Errore fetching wantlist: {e}")
+            send_telegram(f"❌ Errore fetching wantlist: {e}")
+            return
 
     seen = load_seen()
-    daily_messages = []
 
     while True:
         print("👂 Controllo nuovi annunci...")
+
         for rid in release_ids:
             try:
                 results = d.search(
@@ -92,39 +96,41 @@ def bot_loop():
                 if not results:
                     continue
 
-                for idx, listing in enumerate(results, start=1):
-                    listing_id = f"{rid}_{listing.id}"
+                for listing in results:
+                    # 🔑 Prendo prezzo e URI da listing, fallback a listing.data
+                    price = getattr(listing, "price", None)
+                    uri = getattr(listing, "uri", None)
+                    if not price or not uri:
+                        # fallback a listing.data
+                        data = getattr(listing, "data", {})
+                        if "community" in data:
+                            uri = data.get("resource_url")  # link release
+                        price = data.get("price", None)
+
+                    # Se non ci sono ancora, salto
+                    if not price or not uri:
+                        continue
+
+                    listing_id = str(listing.id)
                     if listing_id in seen:
                         continue
+
                     seen.add(listing_id)
                     save_seen(seen)
 
-                    price = getattr(listing, "price", None)
-                    uri = getattr(listing, "uri", None)
-
-                    msg = f"🆕 Nuovo annuncio Discogs\n\n📀 {listing.title}"
-                    if price:
-                        msg += f"\n💰 {price.value} {price.currency}"
-                    if hasattr(listing, "condition"):
-                        msg += f"\n🏷 {listing.condition}"
-                    if uri:
-                        msg += f"\n🔗 {uri}"
-
+                    msg = (
+                        f"🆕 Nuovo annuncio Discogs\n\n"
+                        f"📀 {listing.title}\n"
+                        f"💰 {price.value} {price.currency}\n"
+                        f"🏷 {listing.condition}\n"
+                        f"🔗 {uri}"
+                    )
                     send_telegram(msg)
-                    daily_messages.append(msg)
-                    print(f"✅ Listing #{idx} inviato per release {rid}")
-                    time.sleep(1)
+                    print(f"✅ Inviato annuncio release {rid}, listing {listing_id}")
 
             except Exception as e:
                 print(f"❌ Marketplace error release {rid}: {e}")
                 time.sleep(2)
-
-        # Riepilogo giornaliero
-        now = datetime.now()
-        if now.hour == DAILY_REPORT_HOUR and daily_messages:
-            report_msg = "📊 Riepilogo giornaliero Discogs:\n\n" + "\n\n".join(daily_messages)
-            send_telegram(report_msg)
-            daily_messages = []  # reset
 
         time.sleep(CHECK_INTERVAL)
 
