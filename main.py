@@ -20,7 +20,7 @@ MARKETPLACE_CHECK_LIMIT = 5  # quanti annunci recenti controllare
 
 # 🔴 MODALITÀ TEST
 TEST_MODE = True   # True per test, False per script finale
-TEST_RELEASES = [7334987, 1502804]  # Metti qui gli ID delle release da testare
+TEST_RELEASES = [7334987, 1502804]  # ID delle release da testare
 
 # ================= FLASK (healthcheck Railway) =================
 app = Flask(__name__)
@@ -47,7 +47,7 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 BOT TEST - controllo robusto listing.data")
+    send_telegram("🧪 BOT TEST – controllo listing.price/uri corretti")
 
     d = init_discogs()
     user = d.user(DISCOGS_USER)
@@ -83,20 +83,20 @@ def bot_loop():
                     continue
 
                 for idx, listing in enumerate(results, start=1):
-                    data = listing.data
-                    price_info = data.get("price")
-                    uri = data.get("uri") or data.get("resource_url")
+                    # 🔑 Prezzo e URI presi direttamente dal listing, non da listing.data
+                    price = getattr(listing, 'price', None)
+                    uri = getattr(listing, 'uri', None)
 
-                    if not price_info or not uri:
+                    if not price or not uri:
                         print(f"⚠️ Skipping listing #{idx} release {rid}, price/uri mancanti.")
                         continue
 
                     msg = (
                         f"🧪 TEST Annuncio Discogs\n\n"
-                        f"📀 {data.get('title')}\n"
-                        f"💰 {price_info.get('value')} {price_info.get('currency')}\n"
-                        f"🏷 {data.get('condition', 'N/A')}\n"
-                        f"🔗 https://www.discogs.com{uri}"
+                        f"📀 {listing.title}\n"
+                        f"💰 {price.value} {price.currency}\n"
+                        f"🏷 {listing.condition}\n"
+                        f"🔗 {uri}"
                     )
 
                     send_telegram(msg)
