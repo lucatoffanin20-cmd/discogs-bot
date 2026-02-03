@@ -17,10 +17,10 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 60  # intervallo tra i controlli in secondi
-MARKETPLACE_CHECK_LIMIT = 5
-SEEN_FILE = "seen.json"
+MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
+SEEN_FILE = "seen.json"  # file per gestire annunci già notificati
 
-# ================= FLASK =================
+# ================= FLASK (healthcheck Railway) =================
 app = Flask(__name__)
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -62,7 +62,7 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🤖 Bot Discogs avviato (massima visibilità)")
+    send_telegram("🤖 Bot Discogs avviato")
 
     d = init_discogs()
     try:
@@ -79,7 +79,6 @@ def bot_loop():
 
     while True:
         print("👂 Controllo nuovi annunci...")
-
         for rid in release_ids:
             try:
                 results = d.search(
@@ -91,30 +90,21 @@ def bot_loop():
                 )
 
                 for listing in results:
+                    uri = getattr(listing, "uri", None)
+                    if not uri:
+                        print("⚠️ Listing senza uri, skip")
+                        continue
+
                     listing_id = str(listing.id)
                     if listing_id in seen:
                         continue
 
                     seen.add(listing_id)
-
-                    uri = getattr(listing, "uri", None)
-                    if not uri:
-                        uri_msg = "🔗 Link non disponibile"
-                        print(f"⚠️ Listing senza uri, notificato comunque")
-                    else:
-                        uri_msg = f"🔗 {uri}"
-
-                    msg = (
-                        f"🆕 Nuovo annuncio Discogs\n\n"
-                        f"📀 {listing.title}\n"
-                        f"ID release: {rid}\n"
-                        f"{uri_msg}"
-                    )
-
+                    msg = f"🆕 Nuovo annuncio Discogs\n\n📀 {listing.title}\n🔗 {uri}"
                     send_telegram(msg)
                     time.sleep(2)  # pausa tra notifiche Telegram
 
-                time.sleep(1)  # pausa tra le release per rate limit
+                time.sleep(1)  # pausa tra le release per rispettare rate limit
 
             except discogs_client.exceptions.HTTPError as e:
                 if "429" in str(e):
