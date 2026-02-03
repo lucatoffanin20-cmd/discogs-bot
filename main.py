@@ -15,7 +15,7 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 300          # 5 minuti (irrilevante in test)
+CHECK_INTERVAL = 300          # 5 minuti per test/produzione
 MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
 
 # 🔴 TEST MODE
@@ -73,21 +73,17 @@ def bot_loop():
                     continue
 
                 for listing in results:
-                    # Ignoriamo il prezzo
-                    resource_url = getattr(listing, "resource_url", None)
-                    if not resource_url:
-                        print("⚠️ Listing senza resource_url, skip")
+                    # 🔑 LINK robusto: usa listing.uri sempre disponibile
+                    uri = getattr(listing, "uri", None)
+                    if not uri:
+                        print("⚠️ Listing senza uri, skip")
                         continue
-
-                    # 🔑 LINK CORRETTO
-                    sell_id = resource_url.rsplit("/", 1)[-1]
-                    link = f"https://www.discogs.com/sell/item/{sell_id}"
 
                     msg = (
                         f"🧪 TEST – Annuncio Discogs trovato\n\n"
                         f"📀 {listing.title}\n"
                         f"🏷 {listing.condition}\n"
-                        f"🔗 {link}"
+                        f"🔗 https://www.discogs.com{uri}"
                     )
 
                     send_telegram(msg)
