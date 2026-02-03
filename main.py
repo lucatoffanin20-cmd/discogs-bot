@@ -16,11 +16,11 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 300          # 5 minuti (irrilevante in test)
-MARKETPLACE_CHECK_LIMIT = 5  # annunci recenti
+MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
 
 # 🔴 TEST MODE
 TEST_MODE = True
-TEST_RELEASES = [1496650]  # <-- release che sai avere annunci
+TEST_RELEASES = [1496650]  # ID release da testare
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -51,7 +51,7 @@ def bot_loop():
 
     d = init_discogs()
 
-    # 🔹 SOLO TEST RELEASE
+    # SOLO TEST RELEASE
     release_ids = TEST_RELEASES
     print(f"🧪 TEST MODE – release controllate: {release_ids}")
 
@@ -73,28 +73,26 @@ def bot_loop():
                     continue
 
                 for listing in results:
-                    price = getattr(listing, "price", None)
+                    # Ignoriamo il prezzo
                     resource_url = getattr(listing, "resource_url", None)
-
-                    if not price or not resource_url:
-                        print("⚠️ Listing senza price o resource_url, skip")
+                    if not resource_url:
+                        print("⚠️ Listing senza resource_url, skip")
                         continue
 
-                    # 🔑 LINK CORRETTO (QUESTO È IL FIX!)
+                    # 🔑 LINK CORRETTO
                     sell_id = resource_url.rsplit("/", 1)[-1]
                     link = f"https://www.discogs.com/sell/item/{sell_id}"
 
                     msg = (
                         f"🧪 TEST – Annuncio Discogs trovato\n\n"
                         f"📀 {listing.title}\n"
-                        f"💰 {price.value} {price.currency}\n"
                         f"🏷 {listing.condition}\n"
                         f"🔗 {link}"
                     )
 
                     send_telegram(msg)
                     print("✅ Annuncio inviato correttamente")
-                    return  # 🔴 STOP DOPO IL PRIMO (TEST)
+                    return  # STOP DOPO IL PRIMO listing in test
 
             except discogs_client.exceptions.HTTPError as e:
                 print(f"❌ HTTP error release {rid}: {e}")
