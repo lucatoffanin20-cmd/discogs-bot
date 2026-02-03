@@ -17,7 +17,6 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 60  # 1 minuto per notifiche veloci
-SEEN_FILE = "seen.json"
 MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
 
 # 🔴 MODALITÀ TEST
