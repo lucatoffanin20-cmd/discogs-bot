@@ -16,9 +16,9 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 540        # 9 minuti tra i cicli
-SLEEP_PER_RELEASE = 1.2     # pausa tra ogni release (CRUCIALE)
-PER_PAGE = 3               # 5 listing (i più recenti)
+CHECK_INTERVAL = 900        # 15 minuti tra i cicli
+SLEEP_PER_RELEASE = 2.5     # pausa tra ogni release (CRUCIALE)
+PER_PAGE = 3               # 3 listing (i più recenti)
 
 SEEN_FILE = "seen.json"
 
