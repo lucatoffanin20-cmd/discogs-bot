@@ -63,6 +63,10 @@ def bot_loop():
     d = init_discogs()
     user = d.user(DISCOGS_USER)
 
+    if TEST_MODE:
+    release_ids = TEST_RELEASES
+    print(f"🧪 TEST MODE attivo – release testate: {release_ids}")
+else:
     try:
         wantlist = list(user.wantlist)
         release_ids = [w.release.id for w in wantlist]
@@ -71,6 +75,7 @@ def bot_loop():
         print(f"❌ Errore fetching wantlist: {e}")
         send_telegram(f"❌ Errore fetching wantlist: {e}")
         return
+
 
     seen = set()  # gestione annunci già visti
 
