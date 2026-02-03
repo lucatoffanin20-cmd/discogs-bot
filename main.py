@@ -36,15 +36,15 @@ def send_telegram(msg):
     requests.post(url, data=data, timeout=10)
 
 # ================= SEEN STORAGE =================
-def load_seen():
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
+# def load_seen():
+#     if os.path.exists(SEEN_FILE):
+#         with open(SEEN_FILE, "r") as f:
+#             return set(json.load(f))
+#     return set()
 
-def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+# def save_seen(seen):
+#     with open(SEEN_FILE, "w") as f:
+#         json.dump(list(seen), f)
 
 # ================= DISCOGS =================
 def init_discogs():
@@ -63,7 +63,7 @@ def bot_loop():
     d = init_discogs()
     user = d.user(DISCOGS_USER)
 
-    if TEST_MODE:
+if TEST_MODE:
     release_ids = TEST_RELEASES
     print(f"🧪 TEST MODE attivo – release testate: {release_ids}")
 else:
@@ -75,6 +75,7 @@ else:
         print(f"❌ Errore fetching wantlist: {e}")
         send_telegram(f"❌ Errore fetching wantlist: {e}")
         return
+
 
 
     seen = set()  # gestione annunci già visti
