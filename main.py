@@ -21,8 +21,8 @@ SEEN_FILE = "seen.json"
 MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
 
 # 🔴 MODALITÀ TEST
-TEST_MODE = False
-TEST_RELEASES = [7334987, 1502804]  # inserisci ID release per test
+TEST_MODE = True
+TEST_RELEASES = [1496650]  # inserisci ID release per test
 
 # ================= FLASK =================
 app = Flask(__name__)
