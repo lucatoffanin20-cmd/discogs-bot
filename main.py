@@ -17,7 +17,7 @@ OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 CHECK_INTERVAL = 300  # 5 minuti
 
 # 🔴 TEST MODE
-TEST_RELEASES = [1496650]  # <-- release con annunci ATTIVI
+TEST_RELEASES = [1496650]  # release con annunci attivi
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -47,7 +47,6 @@ def bot_loop():
     send_telegram("🧪 BOT TEST avviato")
 
     d = init_discogs()
-
     print(f"🧪 TEST MODE – release controllate: {TEST_RELEASES}")
 
     while True:
@@ -58,8 +57,6 @@ def bot_loop():
                 results = d.search(
                     type="marketplace",
                     release_id=rid,
-                    sort="listed",
-                    sort_order="desc",
                     per_page=3,
                 )
 
@@ -68,27 +65,18 @@ def bot_loop():
                     continue
 
                 for listing in results:
-                    price = getattr(listing, "price", None)
-                    uri = getattr(listing, "uri", None)
-
-                    if not uri:
-                        print("⚠️ Listing senza URI, skip")
-                        continue
-
-                    price_text = "Prezzo non disponibile"
-                    if price:
-                        price_text = f"{price.value} {price.currency}"
+                    listing_id = listing.id
+                    link = f"https://www.discogs.com/sell/item/{listing_id}"
 
                     msg = (
                         f"🧪 TEST Annuncio Discogs\n\n"
                         f"📀 {listing.title}\n"
-                        f"💰 {price_text}\n"
-                        f"🔗 {uri}"
+                        f"🔗 {link}"
                     )
 
                     send_telegram(msg)
                     print("✅ Notifica inviata")
-                    return  # 🔴 STOP DOPO IL PRIMO ANNUNCIO (TEST)
+                    return  # 🔴 stop dopo il primo annuncio (test)
 
             except Exception as e:
                 print(f"❌ Errore release {rid}: {e}")
