@@ -18,9 +18,9 @@ DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 60  # intervallo tra i controlli in secondi
 MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
-SEEN_FILE = "seen.json"  # file per gestire annunci già notificati
+SEEN_FILE = "seen.json"
 
-# ================= FLASK (healthcheck Railway) =================
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -29,9 +29,9 @@ def health():
 
 # ================= TELEGRAM =================
 def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
         requests.post(url, data=data, timeout=10)
     except Exception as e:
         print(f"❌ Errore invio Telegram: {e}")
@@ -39,11 +39,8 @@ def send_telegram(msg):
 # ================= SEEN STORAGE =================
 def load_seen():
     if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
+        with open(SEEN_FILE, "r") as f:
+            return set(json.load(f))
     return set()
 
 def save_seen(seen):
@@ -63,7 +60,6 @@ def init_discogs():
 # ================= BOT LOOP =================
 def bot_loop():
     send_telegram("🤖 Bot Discogs avviato")
-
     d = init_discogs()
     try:
         user = d.user(DISCOGS_USER)
@@ -79,6 +75,7 @@ def bot_loop():
 
     while True:
         print("👂 Controllo nuovi annunci...")
+
         for rid in release_ids:
             try:
                 results = d.search(
@@ -89,22 +86,36 @@ def bot_loop():
                     per_page=MARKETPLACE_CHECK_LIMIT,
                 )
 
-                for listing in results:
-                    uri = getattr(listing, "uri", None)
-                    if not uri:
-                        print("⚠️ Listing senza uri, skip")
-                        continue
+                if not results:
+                    continue
 
+                for listing in results:
                     listing_id = str(listing.id)
                     if listing_id in seen:
                         continue
 
-                    seen.add(listing_id)
-                    msg = f"🆕 Nuovo annuncio Discogs\n\n📀 {listing.title}\n🔗 {uri}"
-                    send_telegram(msg)
-                    time.sleep(2)  # pausa tra notifiche Telegram
+                    # costruiamo URI anche se listing.uri è mancante
+                    uri = getattr(listing, 'uri', None)
+                    if not uri:
+                        uri = f"https://www.discogs.com/sell/item/{listing.id}"
 
-                time.sleep(1)  # pausa tra le release per rispettare rate limit
+                    title = getattr(listing, 'title', f"Release {rid}")
+                    condition = getattr(listing, 'condition', "N/A")
+
+                    msg = (
+                        f"🆕 Nuovo annuncio Discogs\n\n"
+                        f"📀 {title}\n"
+                        f"🏷 Condizione: {condition}\n"
+                        f"🔗 {uri}"
+                    )
+
+                    send_telegram(msg)
+                    print(f"✅ Notifica inviata per listing {listing_id}")
+                    seen.add(listing_id)
+                    save_seen(seen)
+                    time.sleep(2)  # pausa tra notifiche
+
+                time.sleep(1)  # pausa tra le release per rate limit
 
             except discogs_client.exceptions.HTTPError as e:
                 if "429" in str(e):
@@ -115,7 +126,6 @@ def bot_loop():
             except Exception as e:
                 print(f"❌ Errore release {rid}: {e}")
 
-        save_seen(seen)
         print(f"⏱ Pausa {CHECK_INTERVAL} secondi prima del prossimo controllo")
         time.sleep(CHECK_INTERVAL)
 
