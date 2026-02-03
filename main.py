@@ -16,14 +16,11 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 60  # controlli ogni 60 secondi
-MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti per release
+CHECK_INTERVAL = 60  # intervallo tra i controlli in secondi
+MARKETPLACE_CHECK_LIMIT = 5
+SEEN_FILE = "seen.json"
 
-# 🔴 MODALITÀ TEST
-TEST_MODE = False
-TEST_RELEASES = [1496650]  # inserisci qui ID release di test
-
-# ================= FLASK (healthcheck Railway) =================
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -32,20 +29,21 @@ def health():
 
 # ================= TELEGRAM =================
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
         requests.post(url, data=data, timeout=10)
     except Exception as e:
         print(f"❌ Errore invio Telegram: {e}")
 
 # ================= SEEN STORAGE =================
-SEEN_FILE = "seen.json"
-
 def load_seen():
     if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
+        try:
+            with open(SEEN_FILE, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
     return set()
 
 def save_seen(seen):
@@ -64,23 +62,18 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🤖 Bot Discogs avviato")
+    send_telegram("🤖 Bot Discogs avviato (massima visibilità)")
 
     d = init_discogs()
-    user = d.user(DISCOGS_USER)
-
-    if TEST_MODE:
-        release_ids = TEST_RELEASES
-        print(f"🧪 TEST MODE attivo – release testate: {release_ids}")
-    else:
-        try:
-            wantlist = list(user.wantlist)
-            release_ids = [w.release.id for w in wantlist]
-            print(f"📀 Wantlist caricata: {len(release_ids)} release")
-        except Exception as e:
-            print(f"❌ Errore fetching wantlist: {e}")
-            send_telegram(f"❌ Errore fetching wantlist: {e}")
-            return
+    try:
+        user = d.user(DISCOGS_USER)
+        wantlist = list(user.wantlist)
+        release_ids = [w.release.id for w in wantlist]
+        print(f"📀 Wantlist caricata: {len(release_ids)} release")
+    except Exception as e:
+        print(f"❌ Errore fetching wantlist: {e}")
+        send_telegram(f"❌ Errore fetching wantlist: {e}")
+        return
 
     seen = load_seen()
 
@@ -98,31 +91,34 @@ def bot_loop():
                 )
 
                 for listing in results:
-                    uri = getattr(listing, 'uri', None)
-                    if not uri:
-                        print(f"⚠️ Listing senza uri, skip")
-                        continue
-
                     listing_id = str(listing.id)
                     if listing_id in seen:
                         continue
 
                     seen.add(listing_id)
+
+                    uri = getattr(listing, "uri", None)
+                    if not uri:
+                        uri_msg = "🔗 Link non disponibile"
+                        print(f"⚠️ Listing senza uri, notificato comunque")
+                    else:
+                        uri_msg = f"🔗 {uri}"
+
                     msg = (
                         f"🆕 Nuovo annuncio Discogs\n\n"
                         f"📀 {listing.title}\n"
-                        f"🏷 {listing.condition}\n"
-                        f"🔗 {uri}"
+                        f"ID release: {rid}\n"
+                        f"{uri_msg}"
                     )
+
                     send_telegram(msg)
-                    print(f"✅ Notifica inviata: {listing.title}")
                     time.sleep(2)  # pausa tra notifiche Telegram
 
-                time.sleep(1)  # pausa tra le release per evitare rate limit
+                time.sleep(1)  # pausa tra le release per rate limit
 
             except discogs_client.exceptions.HTTPError as e:
                 if "429" in str(e):
-                    print(f"⚠️ Troppe richieste, aspetto 60 secondi...")
+                    print("⚠️ Troppe richieste, aspetto 60 secondi...")
                     time.sleep(60)
                 else:
                     print(f"❌ Marketplace error release {rid}: {e}")
@@ -132,7 +128,6 @@ def bot_loop():
         save_seen(seen)
         print(f"⏱ Pausa {CHECK_INTERVAL} secondi prima del prossimo controllo")
         time.sleep(CHECK_INTERVAL)
-
 
 # ================= START =================
 if __name__ == "__main__":
