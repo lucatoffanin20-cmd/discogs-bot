@@ -13,14 +13,11 @@ CONSUMER_KEY = os.getenv("CONSUMER_KEY")
 CONSUMER_SECRET = os.getenv("CONSUMER_SECRET")
 OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
-DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 60  # 1 minuto per notifiche veloci
-MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
+CHECK_INTERVAL = 300  # 5 minuti
 
-# 🔴 MODALITÀ TEST
-TEST_MODE = True
-TEST_RELEASES = [1496650]  # inserisci ID release per test
+# 🔴 TEST MODE
+TEST_RELEASES = [1496650]  # <-- release con annunci ATTIVI
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -35,21 +32,10 @@ def send_telegram(msg):
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     requests.post(url, data=data, timeout=10)
 
-# ================= SEEN STORAGE =================
-# def load_seen():
-#     if os.path.exists(SEEN_FILE):
-#         with open(SEEN_FILE, "r") as f:
-#             return set(json.load(f))
-#     return set()
-
-# def save_seen(seen):
-#     with open(SEEN_FILE, "w") as f:
-#         json.dump(list(seen), f)
-
 # ================= DISCOGS =================
 def init_discogs():
     return discogs_client.Client(
-        "WantlistNotifier/1.0",
+        "DiscogsTestBot/1.0",
         consumer_key=CONSUMER_KEY,
         consumer_secret=CONSUMER_SECRET,
         token=OAUTH_TOKEN,
@@ -58,76 +44,56 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🤖 Bot Discogs avviato")
+    send_telegram("🧪 BOT TEST avviato")
 
     d = init_discogs()
-    user = d.user(DISCOGS_USER)
 
-if TEST_MODE:
-    release_ids = TEST_RELEASES
-    print(f"🧪 TEST MODE attivo – release testate: {release_ids}")
-else:
-    try:
-        wantlist = list(user.wantlist)
-        release_ids = [w.release.id for w in wantlist]
-        print(f"📀 Wantlist caricata: {len(release_ids)} release")
-    except Exception as e:
-        print(f"❌ Errore fetching wantlist: {e}")
-        send_telegram(f"❌ Errore fetching wantlist: {e}")
-        return
-
-
-
-    seen = set()  # gestione annunci già visti
+    print(f"🧪 TEST MODE – release controllate: {TEST_RELEASES}")
 
     while True:
-        print("👂 Controllo nuovi annunci...")
+        print("👂 Controllo annunci...")
 
-        for rid in release_ids:
+        for rid in TEST_RELEASES:
             try:
                 results = d.search(
                     type="marketplace",
                     release_id=rid,
                     sort="listed",
                     sort_order="desc",
-                    per_page=MARKETPLACE_CHECK_LIMIT,
+                    per_page=3,
                 )
 
-                for idx, listing in enumerate(results, start=1):
-                    price = getattr(listing, 'price', None)
-                    uri = getattr(listing, 'uri', None)
-                    if not price or not uri:
+                if not results:
+                    print(f"⚠️ Nessun annuncio per release {rid}")
+                    continue
+
+                for listing in results:
+                    price = getattr(listing, "price", None)
+                    uri = getattr(listing, "uri", None)
+
+                    if not uri:
+                        print("⚠️ Listing senza URI, skip")
                         continue
 
-                    listing_id = str(listing.id)
-                    if listing_id in seen:
-                        continue
+                    price_text = "Prezzo non disponibile"
+                    if price:
+                        price_text = f"{price.value} {price.currency}"
 
-                    seen.add(listing_id)
                     msg = (
-                        f"🆕 Nuovo annuncio Discogs\n\n"
+                        f"🧪 TEST Annuncio Discogs\n\n"
                         f"📀 {listing.title}\n"
-                        f"💰 {price.value} {price.currency}\n"
-                        f"🏷 {listing.condition}\n"
+                        f"💰 {price_text}\n"
                         f"🔗 {uri}"
                     )
+
                     send_telegram(msg)
-                    time.sleep(2)  # pausa tra notifiche per Telegram
+                    print("✅ Notifica inviata")
+                    return  # 🔴 STOP DOPO IL PRIMO ANNUNCIO (TEST)
 
-                time.sleep(1)  # pausa tra le release per rispettare il rate limit
-
-            except discogs_client.exceptions.HTTPError as e:
-                if "429" in str(e):
-                    print(f"⚠️ Troppe richieste, aspetto 60 secondi...")
-                    time.sleep(60)
-                else:
-                    print(f"❌ Marketplace error release {rid}: {e}")
             except Exception as e:
                 print(f"❌ Errore release {rid}: {e}")
 
-        print(f"⏱ Pausa {CHECK_INTERVAL} secondi prima del prossimo controllo")
         time.sleep(CHECK_INTERVAL)
-
 
 # ================= START =================
 if __name__ == "__main__":
