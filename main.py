@@ -18,7 +18,7 @@ DISCOGS_USER = os.getenv("DISCOGS_USER")
 
 CHECK_INTERVAL = 900        # 15 minuti tra i cicli
 SLEEP_PER_RELEASE = 2.5     # pausa tra ogni release (CRUCIALE)
-PER_PAGE = 3               # 3 listing (i più recenti)
+PER_PAGE = 1               # 1 SOLO listing (il più recente)
 
 SEEN_FILE = "seen.json"
 
