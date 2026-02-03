@@ -13,11 +13,14 @@ CONSUMER_KEY = os.getenv("CONSUMER_KEY")
 CONSUMER_SECRET = os.getenv("CONSUMER_SECRET")
 OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
+DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 300  # 5 minuti
+CHECK_INTERVAL = 300          # 5 minuti (irrilevante in test)
+MARKETPLACE_CHECK_LIMIT = 5  # annunci recenti
 
 # 🔴 TEST MODE
-TEST_RELEASES = [1496650]  # release con annunci attivi
+TEST_MODE = True
+TEST_RELEASES = [1496650]  # <-- release che sai avere annunci
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -35,7 +38,7 @@ def send_telegram(msg):
 # ================= DISCOGS =================
 def init_discogs():
     return discogs_client.Client(
-        "DiscogsTestBot/1.0",
+        "DiscogsNotifierTest/1.0",
         consumer_key=CONSUMER_KEY,
         consumer_secret=CONSUMER_SECRET,
         token=OAUTH_TOKEN,
@@ -44,20 +47,25 @@ def init_discogs():
 
 # ================= BOT LOOP =================
 def bot_loop():
-    send_telegram("🧪 BOT TEST avviato")
+    send_telegram("🧪 Bot Discogs TEST avviato")
 
     d = init_discogs()
-    print(f"🧪 TEST MODE – release controllate: {TEST_RELEASES}")
+
+    # 🔹 SOLO TEST RELEASE
+    release_ids = TEST_RELEASES
+    print(f"🧪 TEST MODE – release controllate: {release_ids}")
 
     while True:
         print("👂 Controllo annunci...")
 
-        for rid in TEST_RELEASES:
+        for rid in release_ids:
             try:
                 results = d.search(
                     type="marketplace",
                     release_id=rid,
-                    per_page=3,
+                    sort="listed",
+                    sort_order="desc",
+                    per_page=MARKETPLACE_CHECK_LIMIT,
                 )
 
                 if not results:
@@ -65,19 +73,31 @@ def bot_loop():
                     continue
 
                 for listing in results:
-                    listing_id = listing.id
-                    link = f"https://www.discogs.com/sell/item/{listing_id}"
+                    price = getattr(listing, "price", None)
+                    resource_url = getattr(listing, "resource_url", None)
+
+                    if not price or not resource_url:
+                        print("⚠️ Listing senza price o resource_url, skip")
+                        continue
+
+                    # 🔑 LINK CORRETTO (QUESTO È IL FIX!)
+                    sell_id = resource_url.rsplit("/", 1)[-1]
+                    link = f"https://www.discogs.com/sell/item/{sell_id}"
 
                     msg = (
-                        f"🧪 TEST Annuncio Discogs\n\n"
+                        f"🧪 TEST – Annuncio Discogs trovato\n\n"
                         f"📀 {listing.title}\n"
+                        f"💰 {price.value} {price.currency}\n"
+                        f"🏷 {listing.condition}\n"
                         f"🔗 {link}"
                     )
 
                     send_telegram(msg)
-                    print("✅ Notifica inviata")
-                    return  # 🔴 stop dopo il primo annuncio (test)
+                    print("✅ Annuncio inviato correttamente")
+                    return  # 🔴 STOP DOPO IL PRIMO (TEST)
 
+            except discogs_client.exceptions.HTTPError as e:
+                print(f"❌ HTTP error release {rid}: {e}")
             except Exception as e:
                 print(f"❌ Errore release {rid}: {e}")
 
