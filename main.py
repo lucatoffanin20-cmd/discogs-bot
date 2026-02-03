@@ -16,8 +16,9 @@ OAUTH_TOKEN = os.getenv("OAUTH_TOKEN")
 OAUTH_TOKEN_SECRET = os.getenv("OAUTH_TOKEN_SECRET")
 DISCOGS_USER = os.getenv("DISCOGS_USER")
 
-CHECK_INTERVAL = 60  # intervallo tra i controlli in secondi
-MARKETPLACE_CHECK_LIMIT = 5  # quanti listing recenti controllare
+CHECK_INTERVAL = 120  # controlla ogni 2 minuti
+MARKETPLACE_CHECK_LIMIT = 10  # controlla i listing più recenti
+
 SEEN_FILE = "seen.json"
 
 # ================= FLASK =================
@@ -34,7 +35,7 @@ def send_telegram(msg):
     try:
         requests.post(url, data=data, timeout=10)
     except Exception as e:
-        print(f"❌ Errore invio Telegram: {e}")
+        print(f"❌ Errore Telegram: {e}")
 
 # ================= SEEN STORAGE =================
 def load_seen():
@@ -50,7 +51,7 @@ def save_seen(seen):
 # ================= DISCOGS =================
 def init_discogs():
     return discogs_client.Client(
-        "WantlistNotifier/1.0",
+        "WantlistNotifier/2.0",
         consumer_key=CONSUMER_KEY,
         consumer_secret=CONSUMER_SECRET,
         token=OAUTH_TOKEN,
@@ -61,6 +62,8 @@ def init_discogs():
 def bot_loop():
     send_telegram("🤖 Bot Discogs avviato")
     d = init_discogs()
+    seen = load_seen()
+
     try:
         user = d.user(DISCOGS_USER)
         wantlist = list(user.wantlist)
@@ -70,8 +73,6 @@ def bot_loop():
         print(f"❌ Errore fetching wantlist: {e}")
         send_telegram(f"❌ Errore fetching wantlist: {e}")
         return
-
-    seen = load_seen()
 
     while True:
         print("👂 Controllo nuovi annunci...")
@@ -86,40 +87,34 @@ def bot_loop():
                     per_page=MARKETPLACE_CHECK_LIMIT,
                 )
 
-                if not results:
-                    continue
-
+                active_listings = []
                 for listing in results:
+                    # ✅ solo listing attivi
+                    if getattr(listing, "status", "") != "For Sale":
+                        continue
+
                     listing_id = str(listing.id)
                     if listing_id in seen:
                         continue
 
-                    # costruiamo URI anche se listing.uri è mancante
-                    uri = getattr(listing, 'uri', None)
-                    if not uri:
-                        uri = f"https://www.discogs.com/sell/item/{listing.id}"
-
-                    title = getattr(listing, 'title', f"Release {rid}")
-                    condition = getattr(listing, 'condition', "N/A")
-
-                    msg = (
-                        f"🆕 Nuovo annuncio Discogs\n\n"
-                        f"📀 {title}\n"
-                        f"🏷 Condizione: {condition}\n"
-                        f"🔗 {uri}"
-                    )
-
-                    send_telegram(msg)
-                    print(f"✅ Notifica inviata per listing {listing_id}")
                     seen.add(listing_id)
-                    save_seen(seen)
-                    time.sleep(2)  # pausa tra notifiche
+                    # raccoglie listing attivi per messaggio unico
+                    active_listings.append(listing)
 
-                time.sleep(1)  # pausa tra le release per rate limit
+                if active_listings:
+                    msg_lines = [f"🆕 Nuovi annunci per release: {active_listings[0].title}\n"]
+                    for l in active_listings:
+                        # link diretto alla pagina del listing
+                        msg_lines.append(f"🔗 https://www.discogs.com/sell/release/{l.id}")
+                    send_telegram("\n".join(msg_lines))
+                    print(f"✅ Notifica inviata release {rid} con {len(active_listings)} listing")
+                    save_seen(seen)
+
+                time.sleep(1)  # pausa tra release per rispettare API
 
             except discogs_client.exceptions.HTTPError as e:
                 if "429" in str(e):
-                    print("⚠️ Troppe richieste, aspetto 60 secondi...")
+                    print(f"⚠️ Troppe richieste, aspetto 60 secondi...")
                     time.sleep(60)
                 else:
                     print(f"❌ Marketplace error release {rid}: {e}")
