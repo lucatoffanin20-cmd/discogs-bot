@@ -1,7 +1,6 @@
 import os
 import time
 import threading
-import json
 import requests
 import discogs_client
 from flask import Flask
