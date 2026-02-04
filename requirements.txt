@@ -1,3 +1,2 @@
-discogs-client
 requests
 flask
