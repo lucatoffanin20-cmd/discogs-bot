@@ -1,8 +1,7 @@
 import os
-import asyncio
 import json
 import requests
-from threading import Thread
+import asyncio
 from flask import Flask
 from pyppeteer import launch
 
@@ -43,15 +42,14 @@ def save_seen(seen):
 
 # ================== CORE ==================
 async def fetch_mywants(first_time=False):
-    # Lancia Chromium con sessione persistente
     browser = await launch(
-        headless=not first_time,  # headless=False la prima volta per login
+        headless=not first_time,
         args=["--no-sandbox"],
         userDataDir=USER_DATA_DIR
     )
     page = await browser.newPage()
     await page.goto(DISCOGS_URL)
-    
+
     if first_time:
         print("❗ Fai login manualmente nella finestra del browser. Dopo il login chiudi il browser.")
         await asyncio.sleep(120)  # 2 minuti per login
@@ -106,14 +104,12 @@ async def check_mywants(first_time=False):
         print("ℹ️ Nessun nuovo annuncio")
 
 # ================== LOOP ==================
-def loop():
-    import time
-    first_time = True  # prima volta serve login manuale
+async def loop(first_time=True):
     while True:
-        asyncio.run(check_mywants(first_time))
+        await check_mywants(first_time)
         first_time = False
         print(f"⏱ Pausa {CHECK_INTERVAL} secondi\n")
-        time.sleep(CHECK_INTERVAL)
+        await asyncio.sleep(CHECK_INTERVAL)
 
 # ================== FLASK KEEP ALIVE ==================
 app = Flask(__name__)
@@ -122,7 +118,14 @@ app = Flask(__name__)
 def home():
     return "OK", 200
 
+# ================== MAIN ==================
 if __name__ == "__main__":
-    Thread(target=loop, daemon=True).start()
+    # Lancia Flask in un task separato
+    from threading import Thread
+    def run_flask():
+        app.run(host="0.0.0.0", port=8080)
+    Thread(target=run_flask, daemon=True).start()
+
+    # Avvia loop principale async
     send_telegram("🤖 Bot Discogs avviato correttamente")
-    app.run(host="0.0.0.0", port=8080)
+    asyncio.run(loop())
