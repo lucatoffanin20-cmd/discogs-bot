@@ -11,7 +11,7 @@ import logging
 import hashlib
 
 # ================== CONFIG ==================
-CHECK_INTERVAL = 600  # 10 minuti tra i controlli completi
+CHECK_INTERVAL = 300  # 5 minuti tra i controlli completi
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
