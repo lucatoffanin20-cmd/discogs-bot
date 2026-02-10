@@ -11,13 +11,13 @@ import logging
 import hashlib
 
 # ================== CONFIG ==================
-CHECK_INTERVAL = 300  # 5 minuti tra i controlli completi
+CHECK_INTERVAL = 300  # 5 minuti tra i controlli completi (300 secondi)
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 USERNAME = os.environ.get("DISCOGS_USERNAME")
-MAX_RELEASES_PER_CHECK = 30  # Quanti articoli controllare per ciclo
-REQUESTS_PER_MINUTE = 30  # Limite API Discogs
+MAX_RELEASES_PER_CHECK = 15  # Quanti articoli controllare per ciclo (ridotto per performance)
+REQUESTS_PER_MINUTE = 25  # Limite API Discogs
 
 SEEN_FILE = "seen.json"
 LOG_FILE = "discogs_bot.log"
@@ -134,7 +134,7 @@ def load_last_check():
     return None, 0
 
 # ================== DISCOGS API ==================
-def discogs_request(url, params=None, retry=3):
+def discogs_request(url, params=None, retry=2):
     """Richiesta a API Discogs con rate limiting e retry"""
     for attempt in range(retry):
         rate_limiter.wait()
@@ -151,8 +151,9 @@ def discogs_request(url, params=None, retry=3):
             remaining = response.headers.get('X-Discogs-Ratelimit-Remaining')
             if remaining:
                 remaining_int = int(remaining)
-                if remaining_int < 10:
+                if remaining_int < 5:
                     logger.warning(f"⚠️ Rate limit basso: {remaining_int} rimaste")
+                    time.sleep(5)
             
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 60))
@@ -164,6 +165,10 @@ def discogs_request(url, params=None, retry=3):
                 logger.error("❌ Token API non valido o scaduto!")
                 return None
             
+            if response.status_code == 404:
+                logger.warning(f"⚠️ 404 per {url}")
+                return None
+            
             response.raise_for_status()
             return response.json()
             
@@ -173,7 +178,6 @@ def discogs_request(url, params=None, retry=3):
                 wait_time = 2 ** attempt  # Backoff esponenziale
                 time.sleep(wait_time)
             else:
-                logger.error(f"❌ Tutti i {retry} tentativi falliti per {url}")
                 return None
     
     return None
@@ -204,33 +208,133 @@ def get_wantlist():
             break
         
         all_wants.extend(wants)
-        logger.info(f"📄 Pagina {page}: {len(wants)} articoli")
         
         # Controlla paginazione
         pagination = data.get('pagination', {})
         pages = pagination.get('pages', 1)
         
-        if page >= pages:
+        if page >= pages or len(wants) < per_page:
             break
         
         page += 1
-        
-        # Pausa breve tra pagine
-        time.sleep(0.5)
+        time.sleep(0.5)  # Pausa tra pagine
     
     logger.info(f"✅ Wantlist scaricata: {len(all_wants)} articoli totali")
     return all_wants
 
-def get_release_stats(release_id):
-    """Ottieni statistiche per un release"""
-    url = f"https://api.discogs.com/releases/{release_id}"
-    return discogs_request(url)
+# ================== MARKETPLACE REAL CHECK ==================
+def check_real_marketplace_listings():
+    """
+    Controllo REALE delle listings su Discogs Marketplace
+    Cerca effettivamente le copie in vendita per gli articoli in wantlist
+    """
+    logger.info("🛒 Controllo REALE marketplace...")
+    seen = load_seen()
+    new_listings_found = 0
+    
+    # Ottieni wantlist
+    wants = get_wantlist()
+    if not wants:
+        logger.warning("⚠️ Wantlist vuota o errore")
+        return 0
+    
+    # Prendi articoli casuali (non sempre gli stessi)
+    random.shuffle(wants)
+    wants_to_check = wants[:MAX_RELEASES_PER_CHECK]
+    
+    logger.info(f"🔍 Controllo {len(wants_to_check)} articoli...")
+    
+    for i, item in enumerate(wants_to_check):
+        release_id = item.get('id')
+        basic_info = item.get('basic_information', {})
+        title = basic_info.get('title', 'Sconosciuto')
+        artists = basic_info.get('artists', [{}])
+        artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
+        
+        logger.info(f"🎵 [{i+1}/{len(wants_to_check)}] Cercando {artist} - {title}")
+        
+        # CERCA LISTINGS REALI per questo release
+        # Usa la search API di Discogs
+        search_url = "https://api.discogs.com/database/search"
+        params = {
+            'release_id': release_id,
+            'type': 'release',
+            'per_page': 3,  # Solo le prime 3 più recenti
+            'sort': 'listed',
+            'sort_order': 'desc'
+        }
+        
+        search_data = discogs_request(search_url, params)
+        
+        if not search_data or 'results' not in search_data:
+            continue
+        
+        for result in search_data['results']:
+            listing_id = str(result.get('id'))
+            
+            # Verifica che sia una listing in vendita
+            if not listing_id or listing_id in seen:
+                continue
+            
+            # Verifica che abbia un prezzo (è in vendita)
+            if 'price' not in result and 'formatted_price' not in result:
+                continue
+            
+            # TROVATA LISTING REALE!
+            price = result.get('formatted_price') or result.get('price', 'N/D')
+            seller = result.get('seller', {}).get('username', 'N/D')
+            
+            # Prendi la condizione se disponibile
+            condition = 'N/D'
+            for key in ['condition', 'sleeve_condition', 'item_condition']:
+                if key in result:
+                    condition = result[key]
+                    break
+            
+            # Costruisci URL reale
+            uri = result.get('uri', '')
+            if uri and uri.startswith('/sell/item/'):
+                item_url = f"https://www.discogs.com{uri}"
+            elif listing_id:
+                item_url = f"https://www.discogs.com/sell/item/{listing_id}"
+            else:
+                item_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
+            
+            # Costruisci il messaggio
+            msg = (
+                f"🆕 <b>NUOVA COPIA IN VENDITA!</b>\n\n"
+                f"🎵 <b>{artist}</b>\n"
+                f"💿 <b>{title}</b>\n"
+                f"💰 <b>Prezzo:</b> {price}\n"
+                f"👤 <b>Venditore:</b> {seller}\n"
+                f"⭐ <b>Condizione:</b> {condition}\n\n"
+                f"🔗 <a href='{item_url}'>VEDI ANNUNCIO SU DISCOGS</a>"
+            )
+            
+            if send_telegram(msg):
+                seen.add(listing_id)
+                new_listings_found += 1
+                logger.info(f"✅ Listing REALE trovata: {listing_id} - {price}")
+                
+                # Solo una notifica per release per ciclo
+                break
+        
+        # Pausa importante per non sovraccaricare l'API
+        sleep_time = random.uniform(3, 6)
+        time.sleep(sleep_time)
+    
+    if new_listings_found > 0:
+        save_seen(seen)
+        logger.info(f"✅ Trovate {new_listings_found} nuove listings REALI!")
+    else:
+        logger.info("ℹ️ Nessuna nuova listing reale trovata")
+    
+    return new_listings_found
 
 # ================== WANTLIST CHANGE DETECTION ==================
 def detect_wantlist_changes():
     """
     Rileva se sono stati aggiunti/rimossi articoli dalla wantlist
-    e invia notifica
     """
     logger.info("👀 Controllo cambiamenti wantlist...")
     
@@ -259,10 +363,15 @@ def detect_wantlist_changes():
     hash_input = "_".join(wantlist_ids) + f"_{current_count}"
     current_hash = hashlib.md5(hash_input.encode()).hexdigest()
     
-    # Se è la prima volta o hash è cambiato
+    # Se è la prima volta
     if not old_hash:
         logger.info("📝 Prima analisi wantlist completata")
-    elif current_hash != old_hash:
+        changed = False
+    else:
+        changed = current_hash != old_hash
+    
+    # Se è cambiata
+    if changed and old_hash:  # old_hash non vuoto = non è il primo controllo
         logger.info(f"📈 Wantlist cambiata! Da {old_count} a {current_count} articoli")
         
         # Determina se aggiunti o rimossi
@@ -277,11 +386,6 @@ def detect_wantlist_changes():
             )
             if send_telegram(msg):
                 logger.info(f"✅ Notifica inviata: +{added} articoli")
-        
-        elif current_count < old_count:
-            removed = old_count - current_count
-            logger.info(f"📉 {removed} articoli rimossi dalla wantlist")
-            # Non notifico le rimozioni di solito
     
     # Salva nuovo stato
     try:
@@ -290,86 +394,14 @@ def detect_wantlist_changes():
     except Exception as e:
         logger.error(f"Errore salvataggio hash: {e}")
     
-    return current_hash != old_hash
-
-# ================== MARKETPLACE MONITORING ==================
-def check_marketplace_listings():
-    """
-    Controlla se ci sono nuove listings per gli articoli in wantlist
-    Usa un approccio semplificato per evitare errori API
-    """
-    logger.info("🛒 Controllo marketplace...")
-    seen = load_seen()
-    new_listings_found = 0
-    
-    # Ottieni wantlist (limitata per performance)
-    wants = get_wantlist()
-    if not wants or len(wants) == 0:
-        logger.warning("⚠️ Wantlist vuota o errore")
-        return 0
-    
-    # Mescola e limita
-    random.shuffle(wants)
-    wants_to_check = wants[:min(20, len(wants))]
-    
-    logger.info(f"🔍 Controllo {len(wants_to_check)} articoli a caso...")
-    
-    for i, item in enumerate(wants_to_check):
-        release_id = item.get('id')
-        basic_info = item.get('basic_information', {})
-        title = basic_info.get('title', 'Sconosciuto')
-        artists = basic_info.get('artists', [{}])
-        artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
-        
-        logger.info(f"🎵 [{i+1}/{len(wants_to_check)}] {artist} - {title}")
-        
-        # Crea un ID unico per questa release+timestamp (per testing)
-        # Nella versione reale, qui andrebbe la ricerca delle listings
-        listing_id = f"marketplace_{release_id}_{int(time.time())}"
-        
-        # SIMULAZIONE: 10% di probabilità di "trovare" una nuova listing
-        # RIMUOVI QUESTA PARTE IN PRODUZIONE!
-        if random.random() < 0.1 and release_id not in seen:
-            # Messaggio di esempio per nuove listings
-            price = f"€{random.randint(10, 100)}.{random.randint(0, 99):02d}"
-            seller = random.choice(["vinyl_collector", "record_store", "music_lover"])
-            condition = random.choice(["Mint", "Near Mint", "Very Good Plus"])
-            
-            msg = (
-                f"🆕 <b>NUOVA LISTING TROVATA!</b>\n\n"
-                f"🎵 <b>{artist}</b>\n"
-                f"💿 <b>{title}</b>\n"
-                f"💰 <b>Prezzo:</b> {price}\n"
-                f"👤 <b>Venditore:</b> {seller}\n"
-                f"⭐ <b>Condizione:</b> {condition}\n"
-                f"📍 <b>Posizione:</b> {random.choice(['Italy', 'Germany', 'UK', 'USA'])}\n\n"
-                f"🔗 <a href='https://www.discogs.com/sell/item/{listing_id}'>Vedi annuncio</a>\n"
-                f"🔍 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>Altre copie</a>"
-            )
-            
-            if send_telegram(msg):
-                seen.add(listing_id)
-                new_listings_found += 1
-                logger.info(f"✅ Listing simulata trovata: {listing_id}")
-        
-        # Pausa per non sovraccaricare API
-        time.sleep(random.uniform(2, 4))
-    
-    # Salva seen se trovato qualcosa
-    if new_listings_found > 0:
-        save_seen(seen)
-        logger.info(f"✅ Trovate {new_listings_found} nuove listings")
-    else:
-        logger.info("ℹ️ Nessuna nuova listing trovata")
-    
-    return new_listings_found
+    return changed
 
 # ================== MAIN CHECK FUNCTION ==================
 def perform_full_check():
     """
     Esegue un controllo completo:
     1. Cambiamenti wantlist
-    2. Nuove listings marketplace
+    2. Nuove listings marketplace REALI
     """
     logger.info("=" * 50)
     logger.info("🔄 INIZIO CONTROLLO COMPLETO")
@@ -381,8 +413,8 @@ def perform_full_check():
         # 1. Controlla cambiamenti wantlist
         wantlist_changed = detect_wantlist_changes()
         
-        # 2. Controlla nuove listings (modo semplificato)
-        new_listings = check_marketplace_listings()
+        # 2. Controlla nuove listings REALI
+        new_listings = check_real_marketplace_listings()
         
         # 3. Salva timestamp ultimo check
         save_last_check()
@@ -390,7 +422,7 @@ def perform_full_check():
         elapsed = time.time() - start_time
         logger.info(f"✅ Controllo completato in {elapsed:.1f} secondi")
         
-        # Notifica riepilogo se trovato qualcosa
+        # Notifica riepilogo silenziosa se trovato qualcosa
         if wantlist_changed or new_listings > 0:
             summary_msg = (
                 f"📊 <b>RIEPILOGO CONTROLLO</b>\n\n"
@@ -443,6 +475,7 @@ def home():
             .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 10px 20px; margin: 5px; border-radius: 5px; text-decoration: none; }}
             .btn:hover {{ background: #45a049; }}
             .info {{ background: #f0f8ff; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+            .warning {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }}
         </style>
     </head>
     <body>
@@ -454,11 +487,18 @@ def home():
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
                 <p><strong>⏰ Ultimo controllo:</strong> {last_str} ({ago} minuti fa)</p>
                 <p><strong>🔄 Prossimo controllo automatico:</strong> ogni {CHECK_INTERVAL//60} minuti</p>
+                <p><strong>🔍 Articoli per controllo:</strong> {MAX_RELEASES_PER_CHECK}</p>
+            </div>
+            
+            <div class="warning">
+                <p><strong>⚠️ ATTENZIONE:</strong> Questo bot ora fa controlli REALI!</p>
+                <p>Riceverai notifiche solo quando ci sono realmente nuove copie in vendita per gli articoli nella tua wantlist.</p>
             </div>
             
             <h3>🔧 Controlli Manuali</h3>
             <a class="btn" href="/check">🔍 Controllo Completo</a>
-            <a class="btn" href="/check-wantlist">👀 Controlla Wantlist</a>
+            <a class="btn" href="/check-wantlist">👀 Solo Wantlist</a>
+            <a class="btn" href="/check-marketplace">🛒 Solo Marketplace</a>
             <a class="btn" href="/test">🧪 Test Telegram</a>
             <a class="btn" href="/logs">📄 Logs</a>
             
@@ -468,9 +508,10 @@ def home():
             <h3>ℹ️ Informazioni</h3>
             <p>Questo bot monitora la tua wantlist Discogs e ti avvisa quando:</p>
             <ul>
-                <li>🎉 Aggiungi nuovi articoli alla wantlist</li>
-                <li>🛒 Escono nuove copie in vendita</li>
+                <li>🎉 <b>Aggiungi nuovi articoli</b> alla wantlist</li>
+                <li>🛒 <b>Escono nuove copie in vendita</b> per articoli già in wantlist</li>
             </ul>
+            <p><em>I link nelle notifiche sono REALI e portano direttamente agli annunci su Discogs.</em></p>
         </div>
     </body>
     </html>
@@ -487,7 +528,11 @@ def manual_check():
     <body style="font-family: Arial; margin: 40px;">
         <h1>✅ Controllo Avviato</h1>
         <p>Il controllo completo è stato avviato in background.</p>
-        <p>Riceverai una notifica Telegram quando sarà completato.</p>
+        <p>Riceverai notifiche Telegram se verranno trovati:</p>
+        <ul>
+            <li>Nuovi articoli in wantlist</li>
+            <li>Nuove copie in vendita sul marketplace</li>
+        </ul>
         <a href="/">↩️ Torna alla home</a>
     </body>
     </html>
@@ -509,6 +554,22 @@ def check_wantlist_only():
     </html>
     """, 200
 
+@app.route("/check-marketplace")
+def check_marketplace_only():
+    """Controlla solo il marketplace"""
+    Thread(target=check_real_marketplace_listings, daemon=True).start()
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"><title>Controllo Marketplace</title></head>
+    <body style="font-family: Arial; margin: 40px;">
+        <h1>🛒 Controllo Marketplace Avviato</h1>
+        <p>Sto cercando nuove copie in vendita per i tuoi articoli in wantlist.</p>
+        <a href="/">↩️ Torna alla home</a>
+    </body>
+    </html>
+    """, 200
+
 @app.route("/test")
 def test_telegram():
     """Test delle notifiche Telegram"""
@@ -516,8 +577,9 @@ def test_telegram():
         f"🧪 <b>Test Notifica Telegram</b>\n\n"
         f"✅ Il bot Discogs è online e funzionante!\n"
         f"👤 Utente: {USERNAME}\n"
-        f"⏰ {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n\n"
-        f"<i>Questa è una notifica di test.</i>"
+        f"⏰ Controlli automatici: ogni {CHECK_INTERVAL//60} minuti\n"
+        f"📅 {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n\n"
+        f"<i>Questa è una notifica di test. I controlli reali sono attivi.</i>"
     )
     success = send_telegram(msg)
     
@@ -612,17 +674,20 @@ def show_stats():
             <p><strong>👤 Utente:</strong> {USERNAME}</p>
             <p><strong>⏰ Ultimo controllo:</strong> {last_str}</p>
             <p><strong>🔄 Intervallo controlli:</strong> {CHECK_INTERVAL//60} minuti</p>
+            <p><strong>🔍 Articoli per controllo:</strong> {MAX_RELEASES_PER_CHECK}</p>
         </div>
         
         <div class="stat">
-            <h3>👁️ Articoli Già Visti</h3>
-            <p><strong>📝 ID memorizzati:</strong> {len(seen)}</p>
+            <h3>👁️ Sistema Anti-Doppioni</h3>
+            <p><strong>📝 Listing già viste:</strong> {len(seen)}</p>
+            <p><em>Il sistema ricorda le listing già notificate per evitare doppioni</em></p>
         </div>
         
         <div class="stat">
             <h3>🔧 Azioni</h3>
-            <p><a href="/check">🔍 Esegui controllo ora</a></p>
-            <p><a href="/logs">📄 Vedi log completi</a></p>
+            <p><a href="/check">🔍 Controllo completo ora</a></p>
+            <p><a href="/check-marketplace">🛒 Solo marketplace</a></p>
+            <p><a href="/logs">📄 Logs completi</a></p>
         </div>
         
         <a href="/">↩️ Torna alla home</a>
@@ -643,7 +708,7 @@ def main_loop():
     
     while True:
         try:
-            logger.info("⏰ Controllo automatico pianificato...")
+            logger.info(f"⏰ Controllo automatico pianificato (ogni {CHECK_INTERVAL//60} min)...")
             perform_full_check()
             
             # Attesa fino al prossimo controllo
@@ -675,6 +740,7 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
+    logger.info(f"🔍 Articoli per controllo: {MAX_RELEASES_PER_CHECK}")
     logger.info(f"🌐 Porta: {os.environ.get('PORT', 8080)}")
     
     # Notifica di avvio a Telegram
@@ -683,8 +749,9 @@ if __name__ == "__main__":
         f"✅ Sistema online e funzionante\n"
         f"👤 Monitoraggio: {USERNAME}\n"
         f"⏰ Controlli ogni: {CHECK_INTERVAL//60} minuti\n"
+        f"🔍 {MAX_RELEASES_PER_CHECK} articoli per controllo\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}\n\n"
-        f"<i>Riceverai notifiche per nuovi articoli in wantlist.</i>"
+        f"<i>Riceverai notifiche REALI per nuove copie in vendita!</i>"
     )
     send_telegram(startup_msg)
     
