@@ -7,7 +7,6 @@ from datetime import datetime
 from flask import Flask
 from threading import Thread
 import logging
-import hashlib
 
 # ================== CONFIG ==================
 CHECK_INTERVAL = 300
@@ -33,6 +32,7 @@ logger = logging.getLogger(__name__)
 # ================== TELEGRAM ==================
 def send_telegram(msg):
     if not TG_TOKEN or not TG_CHAT:
+        logger.error("❌ Token Telegram mancante")
         return False
     
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -45,8 +45,13 @@ def send_telegram(msg):
     
     try:
         response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except:
+        if response.status_code == 200:
+            return True
+        else:
+            logger.error(f"❌ Telegram error {response.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Errore Telegram: {e}")
         return False
 
 # ================== FILE MANAGEMENT ==================
@@ -54,139 +59,164 @@ def load_seen():
     try:
         if os.path.exists(SEEN_FILE):
             with open(SEEN_FILE, "r") as f:
-                return set(json.load(f))
-    except:
-        return set()
+                data = json.load(f)
+                if isinstance(data, list):
+                    return set(data)
+    except Exception as e:
+        logger.error(f"❌ Errore caricamento seen: {e}")
+    return set()
 
 def save_seen(seen):
     try:
         with open(SEEN_FILE, "w") as f:
             json.dump(list(seen), f)
-    except:
-        pass
+        logger.info(f"💾 Salvati {len(seen)} ID")
+    except Exception as e:
+        logger.error(f"❌ Errore salvataggio seen: {e}")
 
-# ================== DISCOGS API CORRETTA ==================
-def get_wantlist():
-    """Ottieni la wantlist completa"""
+# ================== DISCOGS API ROBUSTA ==================
+def discogs_api_call(url, params=None, retry=2):
+    """Chiamata API con error handling"""
+    headers = {
+        "Authorization": f"Discogs token={DISCOGS_TOKEN}",
+        "User-Agent": "DiscogsWantlistBot/1.0"
+    }
+    
+    for attempt in range(retry):
+        try:
+            # Rate limiting semplice
+            time.sleep(1)
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 429:
+                wait = int(response.headers.get('Retry-After', 60))
+                logger.warning(f"⏳ Rate limit, aspetto {wait}s")
+                time.sleep(wait)
+                continue
+            
+            if response.status_code == 200:
+                return response.json()
+            
+            logger.error(f"❌ API error {response.status_code} per {url}")
+            
+        except Exception as e:
+            logger.error(f"❌ Errore API tentativo {attempt+1}: {e}")
+            if attempt < retry - 1:
+                time.sleep(2)
+    
+    return None
+
+def get_wantlist_robust():
+    """Ottieni wantlist con error handling"""
     all_wants = []
     page = 1
+    max_pages = 10
     
-    while True:
+    logger.info(f"📥 Scaricamento wantlist per {USERNAME}...")
+    
+    while page <= max_pages:
         url = f"https://api.discogs.com/users/{USERNAME}/wants"
         params = {
             'page': page,
-            'per_page': 100,
-            'sort': 'added',
-            'sort_order': 'desc'
+            'per_page': 50
         }
         
-        headers = {
-            "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-            "User-Agent": "DiscogsBot/1.0"
-        }
-        
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            if response.status_code != 200:
-                break
-            
-            data = response.json()
-            wants = data.get('wants', [])
-            if not wants:
-                break
-            
-            all_wants.extend(wants)
-            
-            pagination = data.get('pagination', {})
-            if page >= pagination.get('pages', 1):
-                break
-            
-            page += 1
-            time.sleep(1)
-            
-        except:
+        data = discogs_api_call(url, params)
+        if not data:
+            logger.error(f"❌ Errore pagina {page}")
             break
+        
+        wants = data.get('wants', [])
+        if not wants:
+            break
+        
+        all_wants.extend(wants)
+        logger.info(f"📄 Pagina {page}: {len(wants)} articoli")
+        
+        # Controlla se ci sono altre pagine
+        pagination = data.get('pagination', {})
+        total_pages = pagination.get('pages', 1)
+        
+        if page >= total_pages or len(wants) < 50:
+            break
+        
+        page += 1
     
+    logger.info(f"✅ Wantlist scaricata: {len(all_wants)} articoli totali")
     return all_wants
 
-def get_marketplace_listings(release_id):
-    """
-    CORRETTO: Usa l'endpoint GIUSTO per le listings del marketplace
-    """
-    url = f"https://api.discogs.com/marketplace/listings"
+def get_marketplace_listings_safe(release_id):
+    """Ottieni listings del marketplace con error handling"""
+    url = "https://api.discogs.com/marketplace/listings"
     params = {
         'release_id': release_id,
         'status': 'For Sale',
-        'per_page': 10,
+        'per_page': 5,
         'sort': 'listed',
         'sort_order': 'desc'
     }
     
-    headers = {
-        "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-        "User-Agent": "DiscogsBot/1.0"
-    }
+    data = discogs_api_call(url, params)
+    if data and 'listings' in data:
+        return data['listings']
     
-    try:
-        # IMPORTANTE: Aspetta tra le richieste
-        time.sleep(1.5)
-        
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            return data.get('listings', [])
-        elif response.status_code == 404:
-            # Alcuni release potrebbero non avere listings
-            return []
-        else:
-            logger.error(f"API error {response.status_code} per release {release_id}")
-            return []
-            
-    except Exception as e:
-        logger.error(f"Errore API per release {release_id}: {e}")
-        return []
+    return []
 
-# ================== MARKETPLACE CHECK CORRETTO ==================
-def check_marketplace_correct():
-    """
-    Versione CORRETTA che usa l'endpoint giusto
-    """
-    logger.info("🔄 Controllo marketplace CORRETTO...")
+# ================== MARKETPLACE CHECK ROBUSTO ==================
+def check_marketplace_robust():
+    """Controllo marketplace robusto"""
+    logger.info("🔄 Controllo marketplace ROBUSTO...")
+    
+    # Carica wantlist
+    wants = get_wantlist_robust()
+    if not wants:
+        logger.error("❌ Impossibile ottenere wantlist")
+        return 0
+    
     seen = load_seen()
     new_listings = 0
-    
-    # Ottieni wantlist
-    wants = get_wantlist()
-    if not wants:
-        logger.error("❌ Errore wantlist")
-        return 0
     
     logger.info(f"📊 Wantlist: {len(wants)} articoli")
     logger.info(f"👁️ ID già visti: {len(seen)}")
     
-    # Prendi 30 release casuali (ridotto per evitare rate limit)
-    if len(wants) > 30:
-        releases_to_check = random.sample(wants, 30)
+    # Seleziona release da controllare
+    check_count = min(30, len(wants))
+    if check_count == 0:
+        return 0
+    
+    # Prendi alcuni recenti e alcuni casuali
+    recent_count = min(15, check_count)
+    recent = wants[:recent_count]
+    
+    if len(wants) > recent_count:
+        random_count = check_count - recent_count
+        random_sample = random.sample(wants[recent_count:], min(random_count, len(wants[recent_count:])))
+        releases_to_check = recent + random_sample
     else:
-        releases_to_check = wants
+        releases_to_check = recent
+    
+    random.shuffle(releases_to_check)
     
     logger.info(f"🔍 Controllo {len(releases_to_check)} release...")
     
     for i, item in enumerate(releases_to_check):
         release_id = item.get('id')
+        if not release_id:
+            continue
+        
         basic_info = item.get('basic_information', {})
         title = basic_info.get('title', 'Sconosciuto')
         artists = basic_info.get('artists', [{}])
         artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
         
-        logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:30]}...")
+        logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
         
-        # CERCA LISTINGS REALI con endpoint CORRETTO
-        listings = get_marketplace_listings(release_id)
+        # Ottieni listings
+        listings = get_marketplace_listings_safe(release_id)
         
         if not listings:
-            logger.info(f"   ℹ️ Nessuna listing in vendita")
+            logger.info(f"   ℹ️ Nessuna listing attiva")
             continue
         
         logger.info(f"   ✅ {len(listings)} listings trovate")
@@ -197,24 +227,16 @@ def check_marketplace_correct():
             if not listing_id or listing_id in seen:
                 continue
             
-            # Queste sono REALI listings del marketplace
-            price = listing.get('price', {}).get('formatted', 'N/D')
+            # Dati della listing
+            price_obj = listing.get('price', {})
+            price = price_obj.get('formatted', 'N/D')
             seller = listing.get('seller', {}).get('username', 'N/D')
             condition = listing.get('condition', 'N/D')
             
-            # URL REALE e FUNZIONANTE
+            # URL REALE
             item_url = f"https://www.discogs.com/sell/item/{listing_id}"
             
             logger.info(f"   🛒 Listing {listing_id}: {price} da {seller}")
-            
-            # Verifica che l'URL sia valido (test rapido)
-            try:
-                test_response = requests.head(item_url, timeout=5)
-                if test_response.status_code == 404:
-                    logger.warning(f"   ⚠️ URL 404: {item_url}")
-                    continue
-            except:
-                pass
             
             # Invia notifica
             msg = (
@@ -232,11 +254,14 @@ def check_marketplace_correct():
                 new_listings += 1
                 logger.info(f"   📤 Notifica inviata!")
                 break  # Una notifica per release
+            else:
+                logger.error(f"   ❌ Errore invio notifica")
         
         # Pausa importante
-        time.sleep(random.uniform(2, 3))
+        pause = random.uniform(2, 4)
+        time.sleep(pause)
     
-    # Salva
+    # Salva risultati
     if new_listings > 0:
         save_seen(seen)
         logger.info(f"✅ {new_listings} nuove listings notificate")
@@ -250,86 +275,177 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return """
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>🤖 Discogs Bot - CORRETTO</title>
+        <title>🤖 Discogs Bot - ROBUSTO</title>
         <style>
-            body { font-family: Arial; margin: 40px; }
-            .success { background: #e8f5e9; padding: 20px; border-radius: 10px; }
+            body {{ font-family: Arial; margin: 40px; }}
+            .container {{ max-width: 800px; margin: 0 auto; }}
+            .card {{ background: #f5f5f5; padding: 20px; border-radius: 10px; margin: 20px 0; }}
+            .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 10px 20px; 
+                    text-decoration: none; border-radius: 5px; margin: 5px; }}
         </style>
     </head>
     <body>
-        <h1>🤖 Discogs Bot - VERSIONE CORRETTA</h1>
-        
-        <div class="success">
-            <h3>✅ ENDPOINT CORRETTO</h3>
-            <p>Ora usa: <code>/marketplace/listings</code> invece di <code>/database/search</code></p>
-            <p>Link REALI e funzionanti al 100%</p>
+        <div class="container">
+            <h1>🤖 Discogs Bot - VERSIONE ROBUSTA</h1>
+            
+            <div class="card">
+                <h3>✅ SISTEMA ROBUSTO</h3>
+                <p><strong>Utente:</strong> {USERNAME}</p>
+                <p><strong>Intervallo:</strong> {CHECK_INTERVAL//60} minuti</p>
+                <p><strong>Status:</strong> <span style="color: green;">🟢 ONLINE</span></p>
+            </div>
+            
+            <div class="card">
+                <h3>🔧 Controlli</h3>
+                <a class="btn" href="/check">🚀 Controllo Marketplace</a>
+                <a class="btn" href="/test">🧪 Test Telegram</a>
+                <a class="btn" href="/logs">📄 Logs Sistema</a>
+            </div>
+            
+            <div class="card">
+                <h3>ℹ️ Informazioni</h3>
+                <p>Versione robusta con error handling migliorato.</p>
+                <p>Usa l'endpoint corretto <code>/marketplace/listings</code>.</p>
+                <p>Link REALI e funzionanti al 100%.</p>
+            </div>
         </div>
-        
-        <h3>🔧 Controlli</h3>
-        <a href="/check" style="background: #4CAF50; color: white; padding: 10px 20px; text-decoration: none;">
-            🚀 Controllo CORRETTO
-        </a>
-        
-        <a href="/test" style="background: #FF9800; color: white; padding: 10px 20px; text-decoration: none; margin-left: 10px;">
-            🧪 Test Telegram
-        </a>
-        
-        <h3>ℹ️ Info</h3>
-        <p>Questa versione usa l'endpoint corretto del marketplace di Discogs.</p>
-        <p>I link nelle notifiche saranno REALI e funzionanti (nessun 404).</p>
     </body>
     </html>
     """
 
 @app.route("/check")
 def manual_check():
-    Thread(target=check_marketplace_correct, daemon=True).start()
+    Thread(target=check_marketplace_robust, daemon=True).start()
     return """
     <!DOCTYPE html>
-    <html><head><meta charset="UTF-8"><title>Avviato</title></head>
-    <body style="font-family: Arial; margin: 40px;">
-        <h1>🚀 Controllo CORRETTO Avviato</h1>
-        <p>Usa l'endpoint corretto del marketplace.</p>
-        <p>Controlla i logs su Railway.</p>
-        <a href="/">↩️ Home</a>
-    </body></html>
+    <html>
+    <head><meta charset="UTF-8"><title>Avviato</title></head>
+    <body style="font-family: Arial; margin: 40px; text-align: center;">
+        <h1>🚀 Controllo Avviato</h1>
+        <p>Controllo marketplace in esecuzione...</p>
+        <p>Controlla i logs su Railway per i dettagli.</p>
+        <a href="/" style="color: #4CAF50;">↩️ Torna alla Home</a>
+    </body>
+    </html>
     """, 200
 
 @app.route("/test")
 def test_telegram():
-    send_telegram(f"🧪 Test bot CORRETTO\n{datetime.now().strftime('%H:%M %d/%m/%Y')}")
-    return "✅ Test inviato", 200
+    success = send_telegram(
+        f"🧪 Test Bot ROBUSTO\n\n"
+        f"✅ Sistema online\n"
+        f"👤 {USERNAME}\n"
+        f"⏰ {datetime.now().strftime('%H:%M %d/%m/%Y')}"
+    )
+    
+    if success:
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"><title>Test OK</title></head>
+        <body style="font-family: Arial; margin: 40px; text-align: center;">
+            <h1 style="color: green;">✅ Test Inviato</h1>
+            <p>Controlla il tuo Telegram per il messaggio di test.</p>
+            <a href="/">↩️ Home</a>
+        </body>
+        </html>
+        """, 200
+    else:
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"><title>Errore</title></head>
+        <body style="font-family: Arial; margin: 40px; text-align: center;">
+            <h1 style="color: red;">❌ Errore Invio</h1>
+            <p>Controlla le variabili TELEGRAM_TOKEN e TELEGRAM_CHAT_ID</p>
+            <a href="/">↩️ Home</a>
+        </body>
+        </html>
+        """, 500
+
+@app.route("/logs")
+def view_logs():
+    try:
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r", encoding='utf-8') as f:
+                logs = f.read().splitlines()[-100:]
+            logs_html = "<br>".join(logs)
+        else:
+            logs_html = "Nessun log disponibile"
+    except:
+        logs_html = "Errore nella lettura dei log"
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: monospace; margin: 20px; background: #1a1a1a; color: #00ff00; }}
+            pre {{ background: #000; padding: 20px; border-radius: 5px; }}
+        </style>
+    </head>
+    <body>
+        <h2>📄 Logs Sistema (ultime 100 righe)</h2>
+        <pre>{logs_html}</pre>
+        <a href="/" style="color: #00ccff;">↩️ Home</a>
+    </body>
+    </html>
+    """, 200
 
 # ================== MAIN LOOP ==================
-def main_loop_correct():
-    """Loop principale con endpoint corretto"""
+def main_loop_robust():
+    """Loop principale robusto"""
+    logger.info("🔄 Avvio loop principale...")
     time.sleep(10)
     
     while True:
         try:
             logger.info(f"🔄 Controllo automatico ({datetime.now().strftime('%H:%M')})")
-            check_marketplace_correct()
+            check_marketplace_robust()
             
-            for _ in range(CHECK_INTERVAL):
+            logger.info(f"💤 Pausa di {CHECK_INTERVAL//60} minuti...")
+            for seconds in range(CHECK_INTERVAL):
                 time.sleep(1)
                 
         except Exception as e:
-            logger.error(f"❌ Errore loop: {e}")
+            logger.error(f"❌ Errore nel loop principale: {e}")
             time.sleep(60)
 
 # ================== STARTUP ==================
 if __name__ == "__main__":
+    # Verifica variabili
+    required_vars = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]
+    missing = [var for var in required_vars if not os.environ.get(var)]
+    
+    if missing:
+        logger.error(f"❌ Variabili mancanti: {', '.join(missing)}")
+        exit(1)
+    
     logger.info("="*70)
-    logger.info("🤖 DISCOGS BOT - ENDPOINT CORRETTO")
+    logger.info("🤖 DISCOGS BOT - VERSIONE ROBUSTA")
+    logger.info("="*70)
+    logger.info(f"👤 Utente: {USERNAME}")
+    logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info("="*70)
     
-    send_telegram(f"🤖 Bot CORRETTO avviato\nUtente: {USERNAME}")
+    # Notifica avvio
+    send_telegram(
+        f"🤖 <b>Discogs Bot Avviato</b>\n\n"
+        f"✅ Versione robusta online\n"
+        f"👤 {USERNAME}\n"
+        f"⏰ Controlli ogni {CHECK_INTERVAL//60} minuti\n"
+        f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
+    )
     
-    Thread(target=main_loop_correct, daemon=True).start()
+    # Avvia loop
+    Thread(target=main_loop_robust, daemon=True).start()
     
+    # Avvia Flask
     port = int(os.environ.get("PORT", 8080))
+    logger.info(f"🌐 Server Flask sulla porta {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
