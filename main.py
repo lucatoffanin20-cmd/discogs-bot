@@ -71,7 +71,7 @@ def save_stats_cache(cache):
     except Exception as e:
         logger.error(f"❌ Errore salvataggio cache: {e}")
 
-# ================== DISCOGS API ==================
+# ================== DISCOGS API CON FIX ==================
 def get_wantlist():
     """Ottieni wantlist completa"""
     all_wants = []
@@ -84,7 +84,7 @@ def get_wantlist():
         params = {'page': page, 'per_page': 100}
         headers = {
             "Authorization": f"Discogs token={DISCOGS_TOKEN}", 
-            "User-Agent": "DiscogsStatsBot/4.0"
+            "User-Agent": "DiscogsStatsBot/5.0-FIX"
         }
         
         try:
@@ -114,10 +114,13 @@ def get_wantlist():
     logger.info(f"✅ Wantlist: {len(all_wants)} articoli")
     return all_wants
 
-def get_release_stats(release_id):
-    """Ottieni statistiche per una release"""
+def get_release_stats_fixed(release_id):
+    """
+    VERSIONE FIX - NON SI FIDA DI STATS=0
+    Verifica sempre se la pagina delle listings esiste
+    """
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsStatsBot/4.0"}
+    headers = {"User-Agent": "DiscogsStatsBot/5.0-FIX"}
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
@@ -136,13 +139,27 @@ def get_release_stats(release_id):
             if data is None:
                 return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
             
-            num_for_sale = data.get('num_for_sale', 0) if isinstance(data, dict) else 0
+            stats_count = data.get('num_for_sale', 0) if isinstance(data, dict) else 0
             lowest = data.get('lowest_price', {}) if isinstance(data, dict) else {}
             price = lowest.get('value', 'N/D') if isinstance(lowest, dict) else 'N/D'
             currency = lowest.get('currency', '') if isinstance(lowest, dict) else ''
             
+            # 🔴 FIX CRITICO: Se stats dice 0, VERIFICHIAMO CON HEAD REQUEST
+            if stats_count == 0:
+                check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
+                try:
+                    head_response = requests.head(check_url, timeout=5, allow_redirects=True)
+                    if head_response.status_code == 200:
+                        # La pagina esiste! Quasi certamente CI SONO COPIE
+                        logger.warning(f"   ⚠️ Stats=0 ma pagina esiste! Forzo a 1")
+                        stats_count = 1
+                        price = "Verifica manuale"
+                        currency = ""
+                except Exception as e:
+                    logger.debug(f"   ℹ️ Head request fallita: {e}")
+            
             return {
-                'num_for_sale': num_for_sale,
+                'num_for_sale': stats_count,
                 'price': price,
                 'currency': currency
             }
@@ -151,17 +168,17 @@ def get_release_stats(release_id):
             retry_after = int(response.headers.get('Retry-After', 30))
             logger.warning(f"⏳ 429, aspetto {retry_after}s")
             time.sleep(retry_after)
-            return get_release_stats(release_id)
+            return get_release_stats_fixed(release_id)
             
     except Exception as e:
         logger.error(f"❌ Errore stats {release_id}: {e}")
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO CON ANTI-SPAM ==================
-def monitor_stats_antispam():
-    """Monitoraggio con ANTI-SPAM - Non notifica più di una volta per release"""
-    logger.info("📊 Monitoraggio con ANTI-SPAM...")
+# ================== MONITORAGGIO CON FIX COMPLETO ==================
+def monitor_stats_fixed():
+    """Monitoraggio con FIX - Notifica SEMPRE se ci sono copie!"""
+    logger.info("📊 Monitoraggio con FIX COMPLETO...")
     
     wants = get_wantlist()
     if not wants:
@@ -202,21 +219,37 @@ def monitor_stats_antispam():
             
             logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
             
-            # Ottieni stats CORRENTI
-            current = get_release_stats(release_id)
+            # Ottieni stats CORRENTI con la VERSIONE FIX
+            current = get_release_stats_fixed(release_id)
             current_count = current['num_for_sale']
             
             # Recupera stats PRECEDENTI dalla cache
             previous = stats_cache.get(release_id, {})
             previous_count = previous.get('num_for_sale', -1)
             
-            # === ANTI-SPAM: SOLO CAMBIAMENTI REALI ===
+            # === FIX: NOTIFICA SEMPRE ALLA PRIMA RILEVAZIONE SE CI SONO COPIE ===
             if previous_count == -1:
-                # PRIMA VOLTA: NON notificare, solo registra
                 logger.info(f"   📝 Prima rilevazione: {current_count} copie")
                 
+                # 🟢 NOTIFICA SUBITO se ci sono copie!
+                if current_count > 0:
+                    price_display = f"{current['currency']} {current['price']}" if current['price'] != 'N/D' else 'N/D'
+                    msg = (
+                        f"🆕 <b>COPIE DISPONIBILI (PRIMA RILEVAZIONE)</b>\n\n"
+                        f"🎸 <b>{artist}</b>\n"
+                        f"💿 {title}\n\n"
+                        f"📦 <b>{current_count} copie in vendita</b>\n"
+                        f"💰 Prezzo: <b>{price_display}</b>\n\n"
+                        f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI TUTTE LE COPIE</a>"
+                    )
+                    if send_telegram(msg):
+                        notifications_sent += 1
+                        changes_detected += 1
+                        logger.info(f"   📤 NOTIFICA PRIMA RILEVAZIONE! {current_count} copie")
+                        time.sleep(1)
+                
+            # === CAMBIAMENTO REALE ===
             elif current_count != previous_count:
-                # CAMBIAMENTO REALE! 🎉
                 diff = current_count - previous_count
                 
                 if diff > 0:
@@ -226,10 +259,8 @@ def monitor_stats_antispam():
                     emoji = "📉"
                     action = f"{diff} copie"
                 
-                # Prezzo
                 price_display = f"{current['currency']} {current['price']}" if current['price'] != 'N/D' else 'N/D'
                 
-                # SOLO se il numero di copie è CAMBIATO DAVVERO
                 msg = (
                     f"{emoji} <b>CAMBIAMENTO MARKETPLACE</b>\n\n"
                     f"🎸 <b>{artist}</b>\n"
@@ -244,8 +275,6 @@ def monitor_stats_antispam():
                     notifications_sent += 1
                     changes_detected += 1
                     logger.info(f"   🎯 CAMBIAMENTO: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
-                    
-                    # PAUSA TRA NOTIFICHE per non floodare
                     time.sleep(1)
             
             elif current_count > 0 and current_count == previous_count:
@@ -275,7 +304,48 @@ def monitor_stats_antispam():
     logger.info(f"✅ Rilevati {changes_detected} cambiamenti, {notifications_sent} notifiche inviate")
     return changes_detected
 
-# ================== FLASK APP CON SUPPORTO HEAD PER UPTIME ROBOT ==================
+# ================== ENDPOINT DI EMERGENZA ==================
+@app.route("/fix-now")
+def fix_now():
+    """FORZA IL CONTROLLO E RECUPERA ARTICOLI NON RILEVATI"""
+    logger.warning("🆘 AVVIO PROCEDURA DI RECUPERO EMERGENZA!")
+    
+    wants = get_wantlist()[:30]  # Prime 30 release
+    recovered = 0
+    
+    for item in wants:
+        try:
+            release_id = str(item.get('id'))
+            basic_info = item.get('basic_information', {})
+            title = basic_info.get('title', 'Sconosciuto')
+            artists = basic_info.get('artists', [{}])
+            artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
+            
+            # Verifica direttamente la pagina
+            check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
+            head_response = requests.head(check_url, timeout=5, allow_redirects=True)
+            
+            if head_response.status_code == 200:
+                # La pagina esiste! Probabilmente ci sono copie
+                msg = (
+                    f"🆘 <b>RECUPERO EMERGENZA</b>\n\n"
+                    f"🎸 <b>{artist}</b>\n"
+                    f"💿 {title}\n\n"
+                    f"⚠️ Questa release HA UNA PAGINA DI VENDITA\n"
+                    f"🔗 <a href='{check_url}'>VERIFICA MANUALMENTE</a>"
+                )
+                if send_telegram(msg):
+                    recovered += 1
+                    logger.info(f"✅ Recuperata: {artist} - {title[:30]}...")
+            
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"❌ Errore recupero: {e}")
+    
+    return f"<h1>✅ Procedura di recupero completata!</h1><p>Inviate {recovered} notifiche di recupero.</p><a href='/'>↩️ Home</a>", 200
+
+# ================== FLASK APP ==================
 app = Flask(__name__)
 
 # === HOME ===
@@ -289,20 +359,22 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - ANTI-SPAM</title>
+        <title>📊 Discogs Monitor - FIX COMPLETO</title>
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
             .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; }}
             .stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
             .card {{ background: #4CAF50; color: white; padding: 20px; border-radius: 10px; }}
             .warning {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin: 20px 0; }}
+            .critical {{ background: #f8d7da; border-left: 4px solid #dc3545; padding: 20px; margin: 20px 0; }}
             .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 12px 24px; 
                     text-decoration: none; border-radius: 5px; margin: 5px; }}
+            .btn-emergency {{ background: #dc3545; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - ANTI-SPAM</h1>
+            <h1>📊 Discogs Monitor - FIX COMPLETO</h1>
             
             <div class="stats">
                 <div class="card">
@@ -315,45 +387,42 @@ def home():
                 </div>
             </div>
             
-            <div class="warning">
-                <h3>✅ ANTI-SPAM ATTIVO:</h3>
+            <div class="critical">
+                <h3>🚨 FIX APPLICATI:</h3>
                 <ul>
-                    <li>❌ NON notifica alla prima rilevazione</li>
-                    <li>✅ Notifica SOLO quando il numero CAMBIA</li>
-                    <li>💾 Cache persistente (salva su file)</li>
-                    <li>📊 50 release ogni 3 minuti</li>
+                    <li>✅ NOTIFICA IMMEDIATA alla prima rilevazione se ci sono copie</li>
+                    <li>✅ Verifica HEAD request quando stats=0</li>
+                    <li>✅ Endpoint /fix-now per recupero emergenza</li>
                 </ul>
             </div>
             
             <h3>🔧 Controlli</h3>
-            <a class="btn" href="/check">🚀 Controllo ANTI-SPAM</a>
+            <a class="btn" href="/check">🚀 Controllo FIX</a>
+            <a class="btn btn-emergency" href="/fix-now">🆘 RECUPERO EMERGENZA</a>
             <a class="btn" href="/test">🧪 Test Telegram</a>
             <a class="btn" href="/logs">📄 Logs</a>
             <a class="btn" href="/reset">🔄 Reset Cache</a>
             <a class="btn" href="/debug">🔍 Test Release</a>
-            <a class="btn" href="/health">💚 Health Check</a>
             
             <h3>📊 Info</h3>
             <p><strong>Utente:</strong> {USERNAME}</p>
             <p><strong>Cache file:</strong> {STATS_CACHE_FILE}</p>
-            <p><strong>Ultimo aggiornamento:</strong> {datetime.now().strftime('%H:%M %d/%m/%Y')}</p>
+            <p><strong>Stato FIX:</strong> ✅ ATTIVO - Notifica prima rilevazione</p>
         </div>
     </body>
     </html>
     """
 
-# FIX PER UPTIME ROBOT - HOME
 @app.route("/", methods=['HEAD'])
 def home_head():
     return "", 200
 
-# === CHECK ===
+# === CHECK (USING FIXED VERSION) ===
 @app.route("/check")
 def manual_check():
-    Thread(target=monitor_stats_antispam, daemon=True).start()
-    return "<h1>🚀 Monitoraggio ANTI-SPAM avviato!</h1><p>Notifiche solo per cambiamenti REALI.</p><a href='/'>↩️ Home</a>", 200
+    Thread(target=monitor_stats_fixed, daemon=True).start()
+    return "<h1>🚀 Monitoraggio FIX avviato!</h1><p>✅ Notifica immediata alla prima rilevazione.</p><a href='/'>↩️ Home</a>", 200
 
-# FIX PER UPTIME ROBOT - CHECK
 @app.route("/check", methods=['HEAD'])
 def check_head():
     return "", 200
@@ -361,37 +430,43 @@ def check_head():
 # === RESET ===
 @app.route("/reset")
 def reset_cache():
-    """Resetta COMPLETAMENTE la cache"""
     save_stats_cache({})
     logger.warning("🔄 CACHE RESETTATA!")
-    return "<h1>🔄 Cache resettata!</h1><p>Ora tutte le release saranno considerate 'prime rilevazioni' e NON riceverai notifiche finché non cambiano.</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🔄 Cache resettata!</h1><p>Ora TUTTE le release saranno considerate 'prima rilevazione' e NOTIFICATE se hanno copie!</p><a href='/'>↩️ Home</a>", 200
 
-# FIX PER UPTIME ROBOT - RESET
 @app.route("/reset", methods=['HEAD'])
 def reset_head():
     return "", 200
 
-# === DEBUG ===
+# === DEBUG (USING FIXED VERSION) ===
 @app.route("/debug")
 def debug_release():
     release_id = request.args.get('id', '14809291')
-    stats = get_release_stats(release_id)
+    stats = get_release_stats_fixed(release_id)
     cache = load_stats_cache()
     cached = cache.get(release_id, {})
     
+    # Verifica pagina
+    check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
+    page_exists = False
+    try:
+        head = requests.head(check_url, timeout=5, allow_redirects=True)
+        page_exists = head.status_code == 200
+    except:
+        pass
+    
     html = f"<h2>🔍 Debug Release {release_id}</h2>"
-    html += f"<h3>📊 Stats Correnti:</h3>"
+    html += f"<h3>📊 Stats Correnti (FIX):</h3>"
     html += f"<p>Copie: <b>{stats['num_for_sale']}</b></p>"
     html += f"<p>Prezzo: <b>{stats['currency']} {stats['price']}</b></p>"
+    html += f"<p>Pagina esiste: <b>{'✅ SÌ' if page_exists else '❌ NO'}</b></p>"
     html += f"<h3>💾 Cache:</h3>"
     html += f"<p>Copie: <b>{cached.get('num_for_sale', 'N/A')}</b></p>"
-    html += f"<p>Ultimo cambio: <b>{cached.get('last_change', 'Mai')}</b></p>"
-    html += f"<p><b>{'✅ Notificherà SOLO se cambia' if cached else '📝 Prima rilevazione - NON notificherà'}</b></p>"
+    html += f"<p><b>{'✅ NOTIFICHERÀ SUBITO' if stats['num_for_sale'] > 0 else '❌ Nessuna copia'}</b></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
 
-# FIX PER UPTIME ROBOT - DEBUG
 @app.route("/debug", methods=['HEAD'])
 def debug_head():
     return "", 200
@@ -400,16 +475,16 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - ANTI-SPAM</b>\n\n"
-        f"✅ Sistema online - Notifiche solo per cambiamenti REALI\n"
+        f"🧪 <b>Test Monitor - FIX COMPLETO</b>\n\n"
+        f"✅ FIX ATTIVI:\n"
+        f"• Notifica IMMEDIATA prima rilevazione\n"
+        f"• Verifica HEAD quando stats=0\n"
+        f"• Endpoint recupero emergenza\n\n"
         f"👤 {USERNAME}\n"
-        f"⏰ Controllo ogni 3 minuti\n"
-        f"💾 Cache persistente attiva\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
     return "✅ Test inviato" if success else "❌ Errore", 200
 
-# FIX PER UPTIME ROBOT - TEST
 @app.route("/test", methods=['HEAD'])
 def test_head():
     return "", 200
@@ -424,7 +499,6 @@ def view_logs():
     except:
         return "<pre>Nessun log</pre><a href='/'>↩️ Home</a>", 200
 
-# FIX PER UPTIME ROBOT - LOGS
 @app.route("/logs", methods=['HEAD'])
 def logs_head():
     return "", 200
@@ -439,32 +513,29 @@ def view_cache():
     html += "</ul><a href='/'>↩️ Home</a>"
     return html, 200
 
-# FIX PER UPTIME ROBOT - CACHE
 @app.route("/cache", methods=['HEAD'])
 def cache_head():
     return "", 200
 
-# === HEALTH CHECK PER UPTIME ROBOT ===
+# === HEALTH ===
 @app.route("/health")
 def health_check():
-    """Endpoint dedicato per Uptime Robot"""
     return "OK", 200
 
-# FIX PER UPTIME ROBOT - HEALTH (HEAD)
 @app.route("/health", methods=['HEAD'])
 def health_head():
     return "", 200
 
 # ================== MAIN LOOP ==================
-def main_loop_antispam():
+def main_loop_fixed():
     time.sleep(10)
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio ANTI-SPAM - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio FIX - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
-            monitor_stats_antispam()
+            monitor_stats_fixed()
             
             logger.info(f"💤 Pausa 3 minuti...")
             for _ in range(CHECK_INTERVAL):
@@ -476,7 +547,6 @@ def main_loop_antispam():
 
 # ================== STARTUP ==================
 if __name__ == "__main__":
-    # Verifica variabili
     required = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]
     missing = [var for var in required if not os.environ.get(var)]
     
@@ -485,29 +555,29 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE ANTI-SPAM")
+    logger.info("📊 DISCOGS MONITOR - VERSIONE FIX COMPLETO")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 50")
-    logger.info(f"💾 Cache file: {STATS_CACHE_FILE}")
+    logger.info(f"✅ FIX ATTIVI: Notifica prima rilevazione, HEAD check")
     logger.info('='*70)
     
-    # Notifica avvio
     send_telegram(
-        f"📊 <b>Discogs Monitor - ANTI-SPAM</b>\n\n"
-        f"✅ ANTI-SPAM ATTIVO!\n"
-        f"• ❌ Nessuna notifica alla prima rilevazione\n"
-        f"• ✅ Notifiche SOLO per cambiamenti REALI\n"
-        f"• 💾 Cache persistente su file\n"
-        f"• 🌐 Supporto Uptime Robot (HEAD requests)\n\n"
+        f"📊 <b>Discogs Monitor - FIX COMPLETO</b>\n\n"
+        f"✅ <b>FIX ATTIVATI:</b>\n"
+        f"• 🔴 PROBLEMA: API stats=0 anche con copie\n"
+        f"• 🟢 SOLUZIONE: Verifica HEAD + notifica immediata\n\n"
+        f"📦 Oggi riceverai NOTIFICHE IMMEDIATE per:\n"
+        f"  • Nuove copie in vendita\n"
+        f"  • Copie esistenti (prima rilevazione)\n"
+        f"  • Recupero emergenza con /fix-now\n\n"
         f"👤 {USERNAME}\n"
         f"⏰ Controllo ogni 3 minuti\n"
-        f"📊 50 release/ciclo\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
     
-    Thread(target=main_loop_antispam, daemon=True).start()
+    Thread(target=main_loop_fixed, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
