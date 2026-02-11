@@ -304,7 +304,10 @@ def monitor_stats_fixed():
     logger.info(f"✅ Rilevati {changes_detected} cambiamenti, {notifications_sent} notifiche inviate")
     return changes_detected
 
-# ================== ENDPOINT DI EMERGENZA ==================
+# ================== FLASK APP ==================
+app = Flask(__name__)
+
+# === ENDPOINT DI EMERGENZA (ORA DOPO app DEFINITION) ===
 @app.route("/fix-now")
 def fix_now():
     """FORZA IL CONTROLLO E RECUPERA ARTICOLI NON RILEVATI"""
@@ -344,9 +347,6 @@ def fix_now():
             logger.error(f"❌ Errore recupero: {e}")
     
     return f"<h1>✅ Procedura di recupero completata!</h1><p>Inviate {recovered} notifiche di recupero.</p><a href='/'>↩️ Home</a>", 200
-
-# ================== FLASK APP ==================
-app = Flask(__name__)
 
 # === HOME ===
 @app.route("/")
