@@ -19,6 +19,9 @@ SEEN_FILE = "stats_seen.json"
 LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
 
+# ================== EMERGENZA STOP ==================
+EMERGENCY_STOP = False  # Di default False
+
 # ================== LOGGING ==================
 logging.basicConfig(
     level=logging.INFO,
@@ -30,8 +33,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== TELEGRAM ==================
+# ================== TELEGRAM CON BLOCCATORE ==================
 def send_telegram(msg):
+    # 🚫 BLOCCATORE DI EMERGENZA
+    if EMERGENCY_STOP:
+        logger.info(f"🚫 Notifica bloccata in emergenza")
+        return False
+    
     if not TG_TOKEN or not TG_CHAT:
         return False
     
@@ -150,8 +158,8 @@ def get_release_stats_fixed(release_id):
                 try:
                     head_response = requests.head(check_url, timeout=5, allow_redirects=True)
                     if head_response.status_code == 200:
-                        # La pagina esiste! Quasi certamente CI SONO COPIE
-                        logger.warning(f"   ⚠️ Stats=0 ma pagina esiste! Forzo a 1")
+                        # La pagina esiste! Registriamo come 1 per la cache
+                        logger.warning(f"   ⚠️ Stats=0 ma pagina esiste! Forzo a 1 per cache")
                         stats_count = 1
                         price = "Verifica manuale"
                         currency = ""
@@ -175,10 +183,10 @@ def get_release_stats_fixed(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO CON FIX COMPLETO ==================
+# ================== MONITORAGGIO CON FIX ANTI-SPAM ==================
 def monitor_stats_fixed():
-    """Monitoraggio con FIX - Notifica SEMPRE se ci sono copie!"""
-    logger.info("📊 Monitoraggio con FIX COMPLETO...")
+    """Monitoraggio con FIX - NOTIFICHE SOLO PER CAMBIAMENTI REALI"""
+    logger.info("📊 Monitoraggio con FIX ANTI-SPAM...")
     
     wants = get_wantlist()
     if not wants:
@@ -227,28 +235,12 @@ def monitor_stats_fixed():
             previous = stats_cache.get(release_id, {})
             previous_count = previous.get('num_for_sale', -1)
             
-            # === FIX: NOTIFICA SEMPRE ALLA PRIMA RILEVAZIONE SE CI SONO COPIE ===
+            # === FIX ANTI-SPAM: PRIMA RILEVAZIONE = APPRENDIMENTO, MAI NOTIFICARE ===
             if previous_count == -1:
-                logger.info(f"   📝 Prima rilevazione: {current_count} copie")
+                logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
+                # 🔴 NON NOTIFICARE MAI ALLA PRIMA RILEVAZIONE!
                 
-                # 🟢 NOTIFICA SUBITO se ci sono copie!
-                if current_count > 0:
-                    price_display = f"{current['currency']} {current['price']}" if current['price'] != 'N/D' else 'N/D'
-                    msg = (
-                        f"🆕 <b>COPIE DISPONIBILI (PRIMA RILEVAZIONE)</b>\n\n"
-                        f"🎸 <b>{artist}</b>\n"
-                        f"💿 {title}\n\n"
-                        f"📦 <b>{current_count} copie in vendita</b>\n"
-                        f"💰 Prezzo: <b>{price_display}</b>\n\n"
-                        f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI TUTTE LE COPIE</a>"
-                    )
-                    if send_telegram(msg):
-                        notifications_sent += 1
-                        changes_detected += 1
-                        logger.info(f"   📤 NOTIFICA PRIMA RILEVAZIONE! {current_count} copie")
-                        time.sleep(1)
-                
-            # === CAMBIAMENTO REALE ===
+            # === SOLO CAMBIAMENTI REALI GENERANO NOTIFICHE ===
             elif current_count != previous_count:
                 diff = current_count - previous_count
                 
@@ -274,7 +266,7 @@ def monitor_stats_fixed():
                 if send_telegram(msg):
                     notifications_sent += 1
                     changes_detected += 1
-                    logger.info(f"   🎯 CAMBIAMENTO: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
+                    logger.info(f"   🎯 CAMBIAMENTO REALE: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
                     time.sleep(1)
             
             elif current_count > 0 and current_count == previous_count:
@@ -288,7 +280,8 @@ def monitor_stats_fixed():
                     'currency': current['currency'],
                     'artist': artist,
                     'title': title,
-                    'last_change': datetime.now().isoformat(),
+                    'last_change': datetime.now().isoformat() if previous_count != -1 else None,
+                    'first_seen': datetime.now().isoformat(),
                     'last_check': time.time()
                 }
                 logger.info(f"   💾 Cache aggiornata: {previous_count} → {current_count}")
@@ -301,19 +294,36 @@ def monitor_stats_fixed():
     # === SALVA CACHE SOLO ALLA FINE ===
     save_stats_cache(stats_cache)
     
-    logger.info(f"✅ Rilevati {changes_detected} cambiamenti, {notifications_sent} notifiche inviate")
+    logger.info(f"✅ Rilevati {changes_detected} cambiamenti REALI, {notifications_sent} notifiche inviate")
     return changes_detected
 
 # ================== FLASK APP ==================
 app = Flask(__name__)
 
-# === ENDPOINT DI EMERGENZA (ORA DOPO app DEFINITION) ===
+# === ENDPOINT EMERGENZA STOP/START ===
+@app.route("/stop")
+def emergency_stop():
+    global EMERGENCY_STOP
+    EMERGENCY_STOP = True
+    logger.critical("🛑🛑🛑 EMERGENZA - BOT BLOCCATO!")
+    send_telegram("🛑 BOT BLOCCATO IN EMERGENZA - Nessuna notifica")
+    return "<h1>🛑 BOT BLOCCATO</h1><p>Vai su /start per riattivare</p>", 200
+
+@app.route("/start")
+def emergency_start():
+    global EMERGENCY_STOP
+    EMERGENCY_STOP = False
+    logger.warning("✅ Bot riattivato")
+    send_telegram("✅ Bot RIATTIVATO - Notifiche solo per cambiamenti REALI")
+    return "<h1>✅ Bot riattivato</h1>", 200
+
+# === ENDPOINT DI EMERGENZA RECUPERO ===
 @app.route("/fix-now")
 def fix_now():
     """FORZA IL CONTROLLO E RECUPERA ARTICOLI NON RILEVATI"""
     logger.warning("🆘 AVVIO PROCEDURA DI RECUPERO EMERGENZA!")
     
-    wants = get_wantlist()[:30]  # Prime 30 release
+    wants = get_wantlist()[:30]
     recovered = 0
     
     for item in wants:
@@ -324,12 +334,10 @@ def fix_now():
             artists = basic_info.get('artists', [{}])
             artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
             
-            # Verifica direttamente la pagina
             check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
             head_response = requests.head(check_url, timeout=5, allow_redirects=True)
             
             if head_response.status_code == 200:
-                # La pagina esiste! Probabilmente ci sono copie
                 msg = (
                     f"🆘 <b>RECUPERO EMERGENZA</b>\n\n"
                     f"🎸 <b>{artist}</b>\n"
@@ -355,26 +363,34 @@ def home():
     monitored = len(cache)
     with_stats = sum(1 for v in cache.values() if v.get('num_for_sale', 0) > 0)
     
+    status = "🟢 ONLINE" if not EMERGENCY_STOP else "🔴 BLOCCATO"
+    status_color = "green" if not EMERGENCY_STOP else "red"
+    
     return f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - FIX COMPLETO</title>
+        <title>📊 Discogs Monitor - ANTI-SPAM</title>
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
             .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; }}
             .stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
             .card {{ background: #4CAF50; color: white; padding: 20px; border-radius: 10px; }}
             .warning {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin: 20px 0; }}
-            .critical {{ background: #f8d7da; border-left: 4px solid #dc3545; padding: 20px; margin: 20px 0; }}
+            .success {{ background: #d4edda; border-left: 4px solid #28a745; padding: 20px; margin: 20px 0; }}
             .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 12px 24px; 
                     text-decoration: none; border-radius: 5px; margin: 5px; }}
-            .btn-emergency {{ background: #dc3545; }}
+            .btn-stop {{ background: #dc3545; }}
+            .btn-start {{ background: #28a745; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - FIX COMPLETO</h1>
+            <h1>📊 Discogs Monitor - ANTI-SPAM</h1>
+            
+            <div style="margin-bottom: 20px; padding: 15px; background: {status_color}; color: white; border-radius: 10px; text-align: center;">
+                <h2 style="margin:0;">{status}</h2>
+            </div>
             
             <div class="stats">
                 <div class="card">
@@ -387,27 +403,29 @@ def home():
                 </div>
             </div>
             
-            <div class="critical">
-                <h3>🚨 FIX APPLICATI:</h3>
+            <div class="success">
+                <h3>✅ ANTI-SPAM ATTIVO:</h3>
                 <ul>
-                    <li>✅ NOTIFICA IMMEDIATA alla prima rilevazione se ci sono copie</li>
-                    <li>✅ Verifica HEAD request quando stats=0</li>
-                    <li>✅ Endpoint /fix-now per recupero emergenza</li>
+                    <li>❌ MAI notifiche alla prima rilevazione</li>
+                    <li>✅ Notifiche SOLO per CAMBIAMENTI REALI</li>
+                    <li>🔴 Endpoint /stop per bloccare emergenza</li>
+                    <li>🟢 Endpoint /start per riattivare</li>
                 </ul>
             </div>
             
             <h3>🔧 Controlli</h3>
-            <a class="btn" href="/check">🚀 Controllo FIX</a>
-            <a class="btn btn-emergency" href="/fix-now">🆘 RECUPERO EMERGENZA</a>
-            <a class="btn" href="/test">🧪 Test Telegram</a>
-            <a class="btn" href="/logs">📄 Logs</a>
+            <a class="btn" href="/check">🚀 Controllo</a>
+            <a class="btn btn-stop" href="/stop">🔴 STOP EMERGENZA</a>
+            <a class="btn btn-start" href="/start">🟢 START</a>
+            <a class="btn" href="/fix-now">🆘 Recupero</a>
+            <a class="btn" href="/test">🧪 Test</a>
             <a class="btn" href="/reset">🔄 Reset Cache</a>
-            <a class="btn" href="/debug">🔍 Test Release</a>
+            <a class="btn" href="/logs">📄 Logs</a>
             
             <h3>📊 Info</h3>
             <p><strong>Utente:</strong> {USERNAME}</p>
-            <p><strong>Cache file:</strong> {STATS_CACHE_FILE}</p>
-            <p><strong>Stato FIX:</strong> ✅ ATTIVO - Notifica prima rilevazione</p>
+            <p><strong>Stato:</strong> {status}</p>
+            <p><strong>Regola:</strong> 📢 Notifiche SOLO per cambiamenti REALI</p>
         </div>
     </body>
     </html>
@@ -417,11 +435,11 @@ def home():
 def home_head():
     return "", 200
 
-# === CHECK (USING FIXED VERSION) ===
+# === CHECK ===
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_fixed, daemon=True).start()
-    return "<h1>🚀 Monitoraggio FIX avviato!</h1><p>✅ Notifica immediata alla prima rilevazione.</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche SOLO per cambiamenti REALI.</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -432,13 +450,13 @@ def check_head():
 def reset_cache():
     save_stats_cache({})
     logger.warning("🔄 CACHE RESETTATA!")
-    return "<h1>🔄 Cache resettata!</h1><p>Ora TUTTE le release saranno considerate 'prima rilevazione' e NOTIFICATE se hanno copie!</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🔄 Cache resettata!</h1><p>Ora TUTTE le release sono in fase di APPRENDIMENTO - Nessuna notifica alla prima rilevazione.</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/reset", methods=['HEAD'])
 def reset_head():
     return "", 200
 
-# === DEBUG (USING FIXED VERSION) ===
+# === DEBUG ===
 @app.route("/debug")
 def debug_release():
     release_id = request.args.get('id', '14809291')
@@ -446,7 +464,6 @@ def debug_release():
     cache = load_stats_cache()
     cached = cache.get(release_id, {})
     
-    # Verifica pagina
     check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
     page_exists = False
     try:
@@ -456,13 +473,14 @@ def debug_release():
         pass
     
     html = f"<h2>🔍 Debug Release {release_id}</h2>"
-    html += f"<h3>📊 Stats Correnti (FIX):</h3>"
+    html += f"<h3>📊 Stats Correnti:</h3>"
     html += f"<p>Copie: <b>{stats['num_for_sale']}</b></p>"
     html += f"<p>Prezzo: <b>{stats['currency']} {stats['price']}</b></p>"
     html += f"<p>Pagina esiste: <b>{'✅ SÌ' if page_exists else '❌ NO'}</b></p>"
     html += f"<h3>💾 Cache:</h3>"
-    html += f"<p>Copie: <b>{cached.get('num_for_sale', 'N/A')}</b></p>"
-    html += f"<p><b>{'✅ NOTIFICHERÀ SUBITO' if stats['num_for_sale'] > 0 else '❌ Nessuna copia'}</b></p>"
+    html += f"<p>Copie memorizzate: <b>{cached.get('num_for_sale', 'Mai vista')}</b></p>"
+    html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
+    html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -475,11 +493,10 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - FIX COMPLETO</b>\n\n"
-        f"✅ FIX ATTIVI:\n"
-        f"• Notifica IMMEDIATA prima rilevazione\n"
-        f"• Verifica HEAD quando stats=0\n"
-        f"• Endpoint recupero emergenza\n\n"
+        f"🧪 <b>Test Monitor - ANTI-SPAM</b>\n\n"
+        f"✅ Sistema online\n"
+        f"• ❌ MAI notifiche alla prima rilevazione\n"
+        f"• ✅ Solo CAMBIAMENTI REALI\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
@@ -532,7 +549,7 @@ def main_loop_fixed():
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio FIX - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio ANTI-SPAM - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
             monitor_stats_fixed()
@@ -555,23 +572,22 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE FIX COMPLETO")
+    logger.info("📊 DISCOGS MONITOR - VERSIONE ANTI-SPAM DEFINITIVA")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 50")
-    logger.info(f"✅ FIX ATTIVI: Notifica prima rilevazione, HEAD check")
+    logger.info(f"✅ REGOLA: MAI notifiche prima rilevazione")
+    logger.info(f"✅ REGOLA: Solo CAMBIAMENTI REALI generano notifiche")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - FIX COMPLETO</b>\n\n"
-        f"✅ <b>FIX ATTIVATI:</b>\n"
-        f"• 🔴 PROBLEMA: API stats=0 anche con copie\n"
-        f"• 🟢 SOLUZIONE: Verifica HEAD + notifica immediata\n\n"
-        f"📦 Oggi riceverai NOTIFICHE IMMEDIATE per:\n"
-        f"  • Nuove copie in vendita\n"
-        f"  • Copie esistenti (prima rilevazione)\n"
-        f"  • Recupero emergenza con /fix-now\n\n"
+        f"📊 <b>Discogs Monitor - ANTI-SPAM DEFINITIVO</b>\n\n"
+        f"✅ <b>REGOLE FINALI:</b>\n"
+        f"• ❌ MAI notifiche alla prima rilevazione\n"
+        f"• ✅ Solo CAMBIAMENTI REALI generano notifiche\n"
+        f"• 🔴 /stop per bloccare emergenza\n"
+        f"• 🟢 /start per riattivare\n\n"
         f"👤 {USERNAME}\n"
         f"⏰ Controllo ogni 3 minuti\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
