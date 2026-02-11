@@ -275,9 +275,10 @@ def monitor_stats_antispam():
     logger.info(f"✅ Rilevati {changes_detected} cambiamenti, {notifications_sent} notifiche inviate")
     return changes_detected
 
-# ================== FLASK APP ==================
+# ================== FLASK APP CON SUPPORTO HEAD PER UPTIME ROBOT ==================
 app = Flask(__name__)
 
+# === HOME ===
 @app.route("/")
 def home():
     cache = load_stats_cache()
@@ -330,6 +331,7 @@ def home():
             <a class="btn" href="/logs">📄 Logs</a>
             <a class="btn" href="/reset">🔄 Reset Cache</a>
             <a class="btn" href="/debug">🔍 Test Release</a>
+            <a class="btn" href="/health">💚 Health Check</a>
             
             <h3>📊 Info</h3>
             <p><strong>Utente:</strong> {USERNAME}</p>
@@ -340,11 +342,23 @@ def home():
     </html>
     """
 
+# FIX PER UPTIME ROBOT - HOME
+@app.route("/", methods=['HEAD'])
+def home_head():
+    return "", 200
+
+# === CHECK ===
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_antispam, daemon=True).start()
     return "<h1>🚀 Monitoraggio ANTI-SPAM avviato!</h1><p>Notifiche solo per cambiamenti REALI.</p><a href='/'>↩️ Home</a>", 200
 
+# FIX PER UPTIME ROBOT - CHECK
+@app.route("/check", methods=['HEAD'])
+def check_head():
+    return "", 200
+
+# === RESET ===
 @app.route("/reset")
 def reset_cache():
     """Resetta COMPLETAMENTE la cache"""
@@ -352,6 +366,12 @@ def reset_cache():
     logger.warning("🔄 CACHE RESETTATA!")
     return "<h1>🔄 Cache resettata!</h1><p>Ora tutte le release saranno considerate 'prime rilevazioni' e NON riceverai notifiche finché non cambiano.</p><a href='/'>↩️ Home</a>", 200
 
+# FIX PER UPTIME ROBOT - RESET
+@app.route("/reset", methods=['HEAD'])
+def reset_head():
+    return "", 200
+
+# === DEBUG ===
 @app.route("/debug")
 def debug_release():
     release_id = request.args.get('id', '14809291')
@@ -371,6 +391,12 @@ def debug_release():
     
     return html, 200
 
+# FIX PER UPTIME ROBOT - DEBUG
+@app.route("/debug", methods=['HEAD'])
+def debug_head():
+    return "", 200
+
+# === TEST ===
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
@@ -383,6 +409,12 @@ def test_telegram():
     )
     return "✅ Test inviato" if success else "❌ Errore", 200
 
+# FIX PER UPTIME ROBOT - TEST
+@app.route("/test", methods=['HEAD'])
+def test_head():
+    return "", 200
+
+# === LOGS ===
 @app.route("/logs")
 def view_logs():
     try:
@@ -392,6 +424,12 @@ def view_logs():
     except:
         return "<pre>Nessun log</pre><a href='/'>↩️ Home</a>", 200
 
+# FIX PER UPTIME ROBOT - LOGS
+@app.route("/logs", methods=['HEAD'])
+def logs_head():
+    return "", 200
+
+# === CACHE ===
 @app.route("/cache")
 def view_cache():
     cache = load_stats_cache()
@@ -400,6 +438,22 @@ def view_cache():
         html += f"<li>{rid}: {data.get('num_for_sale', 0)} copie - {data.get('artist', '')[:20]}</li>"
     html += "</ul><a href='/'>↩️ Home</a>"
     return html, 200
+
+# FIX PER UPTIME ROBOT - CACHE
+@app.route("/cache", methods=['HEAD'])
+def cache_head():
+    return "", 200
+
+# === HEALTH CHECK PER UPTIME ROBOT ===
+@app.route("/health")
+def health_check():
+    """Endpoint dedicato per Uptime Robot"""
+    return "OK", 200
+
+# FIX PER UPTIME ROBOT - HEALTH (HEAD)
+@app.route("/health", methods=['HEAD'])
+def health_head():
+    return "", 200
 
 # ================== MAIN LOOP ==================
 def main_loop_antispam():
@@ -445,7 +499,8 @@ if __name__ == "__main__":
         f"✅ ANTI-SPAM ATTIVO!\n"
         f"• ❌ Nessuna notifica alla prima rilevazione\n"
         f"• ✅ Notifiche SOLO per cambiamenti REALI\n"
-        f"• 💾 Cache persistente su file\n\n"
+        f"• 💾 Cache persistente su file\n"
+        f"• 🌐 Supporto Uptime Robot (HEAD requests)\n\n"
         f"👤 {USERNAME}\n"
         f"⏰ Controllo ogni 3 minuti\n"
         f"📊 50 release/ciclo\n"
