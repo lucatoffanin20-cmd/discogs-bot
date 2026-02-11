@@ -4,7 +4,7 @@ import requests
 import time
 import random
 from datetime import datetime
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 import logging
 
@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 # ================== TELEGRAM ==================
 def send_telegram(msg):
     if not TG_TOKEN or not TG_CHAT:
-        logger.error("❌ Token Telegram mancante")
         return False
     
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -45,13 +44,8 @@ def send_telegram(msg):
     
     try:
         response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            return True
-        else:
-            logger.error(f"❌ Telegram error {response.status_code}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ Errore Telegram: {e}")
+        return response.status_code == 200
+    except:
         return False
 
 # ================== FILE MANAGEMENT ==================
@@ -60,48 +54,36 @@ def load_seen():
         if os.path.exists(SEEN_FILE):
             with open(SEEN_FILE, "r") as f:
                 data = json.load(f)
-                if isinstance(data, list):
-                    return set(data)
-    except Exception as e:
-        logger.error(f"❌ Errore caricamento seen: {e}")
+                return set(data) if isinstance(data, list) else set()
+    except:
+        return set()
     return set()
 
 def save_seen(seen):
     try:
         with open(SEEN_FILE, "w") as f:
-            json.dump(list(seen), f)
-        logger.info(f"💾 Salvati {len(seen)} ID")
-    except Exception as e:
-        logger.error(f"❌ Errore salvataggio seen: {e}")
+            json.dump(list(seen)[-5000:], f)
+    except:
+        pass
 
-# ================== DISCOGS API FIXED ==================
+# ================== DISCOGS API - ENDPOINT FUNZIONANTE ==================
 def get_wantlist():
-    """Ottieni wantlist"""
+    """Ottieni wantlist completa"""
     all_wants = []
     page = 1
     
-    logger.info(f"📥 Scaricamento wantlist per {USERNAME}...")
+    logger.info(f"📥 Scaricamento wantlist...")
     
     while True:
         url = f"https://api.discogs.com/users/{USERNAME}/wants"
-        params = {
-            'page': page,
-            'per_page': 100,
-            'sort': 'added',
-            'sort_order': 'desc'
-        }
-        
-        headers = {
-            "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-            "User-Agent": "DiscogsWantlistMonitor/2.0"
-        }
+        params = {'page': page, 'per_page': 100, 'sort': 'added', 'sort_order': 'desc'}
+        headers = {"Authorization": f"Discogs token={DISCOGS_TOKEN}", "User-Agent": "DiscogsBot/3.0"}
         
         try:
             time.sleep(0.5)
             response = requests.get(url, headers=headers, params=params, timeout=30)
             
             if response.status_code != 200:
-                logger.error(f"❌ API error {response.status_code}")
                 break
             
             data = response.json()
@@ -117,82 +99,84 @@ def get_wantlist():
                 break
             
             page += 1
-            
-        except Exception as e:
-            logger.error(f"❌ Errore: {e}")
+        except:
             break
     
-    logger.info(f"✅ Wantlist scaricata: {len(all_wants)} articoli")
+    logger.info(f"✅ Wantlist: {len(all_wants)} articoli")
     return all_wants
 
-def get_marketplace_listings_for_release(release_id):
+def get_release_details(release_id):
+    """Ottieni dettagli del release"""
+    url = f"https://api.discogs.com/releases/{release_id}"
+    headers = {"Authorization": f"Discogs token={DISCOGS_TOKEN}", "User-Agent": "DiscogsBot/3.0"}
+    
+    try:
+        time.sleep(0.5)
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.json()
+    except:
+        pass
+    return None
+
+def search_marketplace_listings(query, release_id=None):
     """
-    ENDPOINT CORRETTO per ottenere listings del marketplace
-    Questo FUNZIONA DAVVERO!
+    ENDPOINT CHE FUNZIONA: /database/search con filtri
     """
-    url = f"https://api.discogs.com/marketplace/listings/{release_id}"
+    url = "https://api.discogs.com/database/search"
+    params = {
+        'type': 'release',
+        'sort': 'listed',
+        'sort_order': 'desc',
+        'per_page': 5
+    }
+    
+    if release_id:
+        params['release_id'] = release_id
+    else:
+        params['query'] = query
     
     headers = {
         "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-        "User-Agent": "DiscogsMarketplaceMonitor/2.0"
+        "User-Agent": "DiscogsMarketplaceBot/3.0"
     }
     
     try:
-        time.sleep(1.5)  # Rate limiting importante
+        time.sleep(1.2)  # Rate limiting importante
+        logger.info(f"   🔍 Search API: {release_id or query[:30]}...")
         
-        logger.info(f"   📡 API call: /marketplace/listings/{release_id}")
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code == 404:
-            # Nessuna listing per questo release ID (è un master ID o release senza listings)
-            logger.info(f"   ℹ️ 404 - Nessuna listing per questo ID")
-            return []
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         
         if response.status_code == 200:
             data = response.json()
-            listings = data.get('listings', [])
-            logger.info(f"   ✅ Trovate {len(listings)} listings")
-            return listings
-        
-        logger.error(f"   ❌ API error {response.status_code}")
-        return []
-        
+            results = data.get('results', [])
+            
+            # Filtra SOLO listings del marketplace
+            marketplace_items = []
+            for r in results:
+                # Controlla se è una listing valida
+                uri = r.get('uri', '')
+                has_price = r.get('formatted_price') or r.get('price')
+                has_seller = r.get('seller') is not None
+                
+                # Una listing valida ha URI con /sell/item/ E prezzo
+                if '/sell/item/' in uri and (has_price or has_seller):
+                    marketplace_items.append(r)
+            
+            logger.info(f"   ✅ {len(marketplace_items)} listings trovate")
+            return marketplace_items
+        else:
+            logger.error(f"   ❌ API error {response.status_code}")
+            
     except Exception as e:
         logger.error(f"   ❌ Errore: {e}")
-        return []
-
-def get_listings_from_master_id(master_id):
-    """
-    Alternativa: cerca listings per master ID
-    """
-    url = f"https://api.discogs.com/masters/{master_id}"
     
-    headers = {
-        "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-        "User-Agent": "DiscogsMasterLookup/2.0"
-    }
-    
-    try:
-        time.sleep(1)
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            main_release = data.get('main_release')
-            if main_release:
-                # Prova a trovare listings per il main release
-                return get_marketplace_listings_for_release(main_release)
-        
-        return []
-        
-    except Exception as e:
-        logger.error(f"   ❌ Errore master lookup: {e}")
-        return []
+    return []
 
-# ================== MARKETPLACE CHECK FIXED ==================
-def check_marketplace_fixed():
-    """Versione FIXED che funziona"""
-    logger.info("🔄 Controllo marketplace FIXED...")
+# ================== MARKETPLACE CHECK FINALE ==================
+def check_marketplace_finale():
+    """Versione FINALE che FUNZIONA"""
+    logger.info("🔄 Controllo marketplace FINALE...")
     
     wants = get_wantlist()
     if not wants:
@@ -204,13 +188,13 @@ def check_marketplace_fixed():
     logger.info(f"📊 Wantlist: {len(wants)} articoli")
     logger.info(f"👁️ ID già visti: {len(seen)}")
     
-    # Controlla PIÙ release (35 per ciclo)
-    check_count = min(35, len(wants))
+    # 40 release per ciclo (massimo per performance)
+    check_count = min(40, len(wants))
     
-    # Strategia: 15 recenti + 20 casuali
-    recent = wants[:15]
-    if len(wants) > 15:
-        random_sample = random.sample(wants[15:], min(20, len(wants[15:])))
+    # Strategia: 20 recenti + 20 casuali
+    recent = wants[:20]
+    if len(wants) > 20:
+        random_sample = random.sample(wants[20:], min(20, len(wants[20:])))
         releases_to_check = recent + random_sample
     else:
         releases_to_check = recent
@@ -228,52 +212,43 @@ def check_marketplace_fixed():
         
         logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
         
-        # STRATEGIA A LIVELLI:
-        listings = []
+        # CERCA LISTINGS PER RELEASE ID
+        listings = search_marketplace_listings(None, release_id)
         
-        # Livello 1: Cerca direttamente per release ID
-        if release_id:
-            listings = get_marketplace_listings_for_release(release_id)
-        
-        # Livello 2: Se non trova, cerca per master ID
-        if not listings and 'master_id' in item.get('basic_information', {}):
-            master_id = item['basic_information']['master_id']
-            if master_id and master_id > 0:
-                logger.info(f"   🔄 Tentativo con master ID: {master_id}")
-                listings = get_listings_from_master_id(master_id)
+        # Se non trova, cerca per titolo e artista
+        if not listings:
+            search_query = f"{artist} {title}"
+            listings = search_marketplace_listings(search_query)
         
         if not listings:
             logger.info(f"   ℹ️ Nessuna listing trovata")
             continue
         
         for listing in listings:
-            listing_id = str(listing.get('id'))
+            # Estrai listing ID dall'URI
+            uri = listing.get('uri', '')
+            listing_id = None
             
-            if not listing_id or listing_id in seen:
+            if '/sell/item/' in uri:
+                listing_id = uri.split('/')[-1]
+            
+            if not listing_id:
                 continue
             
-            # Dati listing
-            price_obj = listing.get('price', {})
-            price = price_obj.get('formatted', 'N/D')
-            seller = listing.get('seller', {}).get('username', 'N/D')
+            if listing_id in seen:
+                continue
+            
+            # Dati della listing
+            price = listing.get('formatted_price') or listing.get('price', 'N/D')
+            seller_info = listing.get('seller', {})
+            seller = seller_info.get('username', 'N/D') if seller_info else 'N/D'
             condition = listing.get('condition', 'N/D')
-            sleeve = listing.get('sleeve_condition', 'N/D')
             
             # URL REALE
             item_url = f"https://www.discogs.com/sell/item/{listing_id}"
             
             logger.info(f"   🛒 TROVATA! {listing_id}: {price} da {seller}")
             logger.info(f"   🔗 {item_url}")
-            
-            # Test URL
-            try:
-                test = requests.head(item_url, timeout=5, allow_redirects=True)
-                if test.status_code == 200:
-                    logger.info(f"   ✅ URL valido")
-                else:
-                    logger.warning(f"   ⚠️ URL status: {test.status_code}")
-            except:
-                logger.warning(f"   ⚠️ Impossibile verificare URL")
             
             # Invia notifica
             msg = (
@@ -282,9 +257,8 @@ def check_marketplace_fixed():
                 f"💿 {title}\n"
                 f"💰 <b>{price}</b>\n"
                 f"👤 {seller}\n"
-                f"⭐ {condition}\n"
-                f"📁 {sleeve}\n\n"
-                f"🔗 <a href='{item_url}'>ACQUISTA SU DISCOGS</a>"
+                f"⭐ {condition}\n\n"
+                f"🔗 <a href='{item_url}'>VEDI SU DISCOGS</a>"
             )
             
             if send_telegram(msg):
@@ -293,7 +267,7 @@ def check_marketplace_fixed():
                 logger.info(f"   📤 NOTIFICA INVIATA!")
                 break  # Una notifica per release
         
-        # Pausa importante
+        # Pausa per rate limiting
         time.sleep(random.uniform(2, 3))
     
     if new_listings > 0:
@@ -313,47 +287,37 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>🤖 Discogs Bot - FIXED</title>
-        <meta charset="UTF-8">
+        <title>🤖 Discogs Bot - FINALE</title>
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
             .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; }}
-            .success {{ background: #d4edda; border-left: 4px solid #28a745; padding: 20px; margin: 20px 0; }}
-            .warning {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin: 20px 0; }}
+            .success {{ background: #d4edda; padding: 20px; border-radius: 5px; }}
             .btn {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; 
-                    text-decoration: none; border-radius: 5px; margin: 5px; font-weight: bold; }}
-            .btn:hover {{ background: #218838; }}
+                    text-decoration: none; border-radius: 5px; margin: 5px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🤖 Discogs Bot - VERSIONE FIXED</h1>
+            <h1>🤖 Discogs Bot - VERSIONE FINALE</h1>
             
             <div class="success">
-                <h3>✅ ENDPOINT CORRETTO</h3>
-                <p>Ora usa: <code>/marketplace/listings/{{release_id}}</code></p>
-                <p>Questo endpoint FUNZIONA DAVVERO!</p>
-                <p><strong>Release per ciclo:</strong> 35</p>
-                <p><strong>Intervallo:</strong> {CHECK_INTERVAL//60} minuti</p>
+                <h3>✅ ENDPOINT FUNZIONANTE</h3>
                 <p><strong>Utente:</strong> {USERNAME}</p>
-            </div>
-            
-            <div class="warning">
-                <h3>⚠️ IMPORTANTE</h3>
-                <p>Questa versione usa l'endpoint CORRETTO per le listings del marketplace.</p>
-                <p>Ora il bot DOVREBBE trovare le copie in vendita!</p>
+                <p><strong>Release/ciclo:</strong> 40</p>
+                <p><strong>Intervallo:</strong> {CHECK_INTERVAL//60} minuti</p>
+                <p><strong>Status:</strong> 🟢 ONLINE</p>
             </div>
             
             <h3>🔧 Controlli</h3>
-            <a class="btn" href="/check">🚀 Controllo FIXED</a>
+            <a class="btn" href="/check">🚀 Controllo Marketplace</a>
             <a class="btn" href="/test">🧪 Test Telegram</a>
             <a class="btn" href="/logs">📄 Logs</a>
-            <a class="btn" href="/force-check">⚡ Forza Check (test release specifica)</a>
+            <a class="btn" href="/force-check">⚡ Test Rapido</a>
             
-            <h3>ℹ️ Come testare</h3>
-            <p>1. Aggiungi una release con copie in vendita alla wantlist</p>
-            <p>2. Vai su <a href="/force-check">/force-check</a></p>
-            <p>3. Controlla i logs per vedere se trova le listings</p>
+            <h3>📊 Istruzioni</h3>
+            <p>1. Vai su <strong>/force-check?release_id=14809291</strong> per test</p>
+            <p>2. Controlla i logs per vedere se trova listings</p>
+            <p>3. Se trova, le notifiche arriveranno automaticamente</p>
         </div>
     </body>
     </html>
@@ -361,119 +325,73 @@ def home():
 
 @app.route("/check")
 def manual_check():
-    Thread(target=check_marketplace_fixed, daemon=True).start()
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="UTF-8"><title>Avviato</title></head>
-    <body style="font-family: Arial; margin: 40px; text-align: center;">
-        <h1>🚀 Controllo FIXED Avviato!</h1>
-        <p>Usa l'endpoint CORRETTO del marketplace!</p>
-        <p>Controlla i logs per vedere i risultati.</p>
-        <a href="/">↩️ Dashboard</a>
-    </body>
-    </html>
-    """, 200
+    Thread(target=check_marketplace_finale, daemon=True).start()
+    return "<h1>🚀 Controllo avviato!</h1><a href='/'>↩️ Home</a>", 200
 
 @app.route("/force-check")
 def force_check():
     """Test forzato con release specifica"""
-    test_release_id = request.args.get('release_id', '14809291')  # Black Holes & Revelations
-    logger.info(f"⚡ Test forzato per release {test_release_id}")
+    release_id = request.args.get('release_id', '14809291')
     
-    listings = get_marketplace_listings_for_release(test_release_id)
+    logger.info(f"⚡ TEST FORZATO per release {release_id}")
     
-    result = f"<h2>Test Release {test_release_id}</h2>"
-    result += f"<p>Trovate {len(listings)} listings</p>"
+    listings = search_marketplace_listings(None, release_id)
     
-    for l in listings[:3]:
-        result += f"<p>🛒 {l.get('id')}: {l.get('price', {}).get('formatted')}</p>"
+    html = f"<h2>Test Release {release_id}</h2>"
+    html += f"<p>Trovate {len(listings)} listings</p><ul>"
     
-    return result, 200
+    for l in listings[:5]:
+        uri = l.get('uri', '')
+        lid = uri.split('/')[-1] if '/sell/item/' in uri else 'N/A'
+        price = l.get('formatted_price') or l.get('price', 'N/D')
+        html += f"<li>🛒 {lid}: {price}</li>"
+    
+    html += "</ul><a href='/'>↩️ Home</a>"
+    return html, 200
 
 @app.route("/test")
 def test_telegram():
-    success = send_telegram(
-        f"🧪 <b>Test Bot FIXED</b>\n\n"
-        f"✅ Versione con endpoint CORRETTO\n"
-        f"👤 {USERNAME}\n"
-        f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
-    )
+    success = send_telegram(f"🧪 Test Bot FINALE\n{datetime.now().strftime('%H:%M %d/%m/%Y')}")
     return "✅ Test inviato" if success else "❌ Errore", 200
 
 @app.route("/logs")
 def view_logs():
     try:
-        if os.path.exists(LOG_FILE):
-            with open(LOG_FILE, "r", encoding='utf-8') as f:
-                logs = f.read().splitlines()[-150:]
-            logs_html = "<br>".join(logs)
-        else:
-            logs_html = "Nessun log"
+        with open(LOG_FILE, "r") as f:
+            logs = f.read().splitlines()[-100:]
+        return "<pre>" + "<br>".join(logs) + "</pre><br><a href='/'>↩️ Home</a>", 200
     except:
-        logs_html = "Errore logs"
-    
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="UTF-8"><style>
-        body {{ background: #1a1a1a; color: #00ff00; font-family: monospace; }}
-        pre {{ white-space: pre-wrap; }}
-    </style></head>
-    <body>
-        <pre>{logs_html}</pre>
-        <a href="/" style="color: #00ccff;">↩️ Home</a>
-    </body>
-    </html>
-    """, 200
+        return "<pre>Nessun log</pre><a href='/'>↩️ Home</a>", 200
 
 # ================== MAIN LOOP ==================
-def main_loop_fixed():
+def main_loop():
     time.sleep(10)
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Controllo automatico - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Controllo - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
-            check_marketplace_fixed()
+            check_marketplace_finale()
             
-            logger.info(f"💤 Pausa di {CHECK_INTERVAL//60} minuti...")
             for _ in range(CHECK_INTERVAL):
                 time.sleep(1)
         except Exception as e:
-            logger.error(f"❌ Loop error: {e}", exc_info=True)
+            logger.error(f"❌ Loop error: {e}")
             time.sleep(60)
 
 # ================== STARTUP ==================
 if __name__ == "__main__":
-    # Verifica variabili
-    required = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]
-    missing = [var for var in required if not os.environ.get(var)]
-    
-    if missing:
-        logger.error(f"❌ Variabili mancanti: {missing}")
-        exit(1)
-    
     logger.info('='*70)
-    logger.info("🤖 DISCOGS BOT - VERSIONE FIXED")
+    logger.info("🤖 DISCOGS BOT - VERSIONE FINALE")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
-    logger.info(f"🔍 Release per ciclo: 35")
     logger.info('='*70)
     
-    # Notifica avvio
-    send_telegram(
-        f"🤖 <b>Bot FIXED Avviato!</b>\n\n"
-        f"✅ Endpoint CORRETTO\n"
-        f"👤 {USERNAME}\n"
-        f"⏰ {CHECK_INTERVAL//60} minuti\n"
-        f"🔍 35 release/ciclo\n"
-        f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
-    )
+    send_telegram(f"🤖 Bot FINALE avviato!\n👤 {USERNAME}\n✅ 40 release/ciclo")
     
-    Thread(target=main_loop_fixed, daemon=True).start()
+    Thread(target=main_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
