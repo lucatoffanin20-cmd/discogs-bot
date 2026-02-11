@@ -9,14 +9,15 @@ from threading import Thread
 import logging
 
 # ================== CONFIG ==================
-CHECK_INTERVAL = 300
+CHECK_INTERVAL = 180  # 3 minuti (più reattivo)
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 USERNAME = os.environ.get("DISCOGS_USERNAME")
 
-SEEN_FILE = "seen.json"
-LOG_FILE = "discogs_bot.log"
+SEEN_FILE = "stats_seen.json"  # SEPARATO dal vecchio seen!
+LOG_FILE = "discogs_stats.log"
+STATS_CACHE_FILE = "stats_cache.json"
 
 # ================== LOGGING ==================
 logging.basicConfig(
@@ -48,25 +49,26 @@ def send_telegram(msg):
     except:
         return False
 
-# ================== FILE MANAGEMENT ==================
-def load_seen():
+# ================== STATS CACHE ==================
+def load_stats_cache():
+    """Carica l'ultimo valore noto di num_for_sale per ogni release"""
     try:
-        if os.path.exists(SEEN_FILE):
-            with open(SEEN_FILE, "r") as f:
-                data = json.load(f)
-                return set(data) if isinstance(data, list) else set()
+        if os.path.exists(STATS_CACHE_FILE):
+            with open(STATS_CACHE_FILE, "r") as f:
+                return json.load(f)
     except:
-        return set()
-    return set()
+        pass
+    return {}
 
-def save_seen(seen):
+def save_stats_cache(cache):
+    """Salva i valori correnti"""
     try:
-        with open(SEEN_FILE, "w") as f:
-            json.dump(list(seen)[-5000:], f)
+        with open(STATS_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
     except:
         pass
 
-# ================== DISCOGS API - ENDPOINT FUNZIONANTE ==================
+# ================== DISCOGS API - STATS ==================
 def get_wantlist():
     """Ottieni wantlist completa"""
     all_wants = []
@@ -76,11 +78,11 @@ def get_wantlist():
     
     while True:
         url = f"https://api.discogs.com/users/{USERNAME}/wants"
-        params = {'page': page, 'per_page': 100, 'sort': 'added', 'sort_order': 'desc'}
-        headers = {"Authorization": f"Discogs token={DISCOGS_TOKEN}", "User-Agent": "DiscogsBot/3.0"}
+        params = {'page': page, 'per_page': 100}
+        headers = {"Authorization": f"Discogs token={DISCOGS_TOKEN}", "User-Agent": "DiscogsStatsBot/1.0"}
         
         try:
-            time.sleep(0.5)
+            time.sleep(0.3)
             response = requests.get(url, headers=headers, params=params, timeout=30)
             
             if response.status_code != 200:
@@ -92,12 +94,10 @@ def get_wantlist():
                 break
             
             all_wants.extend(wants)
-            logger.info(f"📄 Pagina {page}: {len(wants)} articoli")
             
             pagination = data.get('pagination', {})
-            if page >= pagination.get('pages', 1) or len(wants) < 100:
+            if page >= pagination.get('pages', 1):
                 break
-            
             page += 1
         except:
             break
@@ -105,96 +105,62 @@ def get_wantlist():
     logger.info(f"✅ Wantlist: {len(all_wants)} articoli")
     return all_wants
 
-def get_release_details(release_id):
-    """Ottieni dettagli del release"""
-    url = f"https://api.discogs.com/releases/{release_id}"
-    headers = {"Authorization": f"Discogs token={DISCOGS_TOKEN}", "User-Agent": "DiscogsBot/3.0"}
+def get_release_stats(release_id):
+    """
+    ENDPOINT CHE FUNZIONA DAVVERO!
+    Restituisce numero copie in vendita e prezzo più basso
+    """
+    url = f"https://api.discogs.com/marketplace/stats/{release_id}"
+    headers = {"User-Agent": "DiscogsStatsBot/1.0"}  # NON serve token!
     
     try:
-        time.sleep(0.5)
+        time.sleep(0.5)  # Rate limiting leggero
         response = requests.get(url, headers=headers, timeout=30)
-        if response.status_code == 200:
-            return response.json()
-    except:
-        pass
-    return None
-
-def search_marketplace_listings(query, release_id=None):
-    """
-    ENDPOINT CHE FUNZIONA: /database/search con filtri
-    """
-    url = "https://api.discogs.com/database/search"
-    params = {
-        'type': 'release',
-        'sort': 'listed',
-        'sort_order': 'desc',
-        'per_page': 5
-    }
-    
-    if release_id:
-        params['release_id'] = release_id
-    else:
-        params['query'] = query
-    
-    headers = {
-        "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-        "User-Agent": "DiscogsMarketplaceBot/3.0"
-    }
-    
-    try:
-        time.sleep(1.2)  # Rate limiting importante
-        logger.info(f"   🔍 Search API: {release_id or query[:30]}...")
-        
-        response = requests.get(url, headers=headers, params=params, timeout=30)
         
         if response.status_code == 200:
             data = response.json()
-            results = data.get('results', [])
+            num_for_sale = data.get('num_for_sale', 0)
+            lowest = data.get('lowest_price', {})
+            price = lowest.get('value', 'N/D')
+            currency = lowest.get('currency', '')
             
-            # Filtra SOLO listings del marketplace
-            marketplace_items = []
-            for r in results:
-                # Controlla se è una listing valida
-                uri = r.get('uri', '')
-                has_price = r.get('formatted_price') or r.get('price')
-                has_seller = r.get('seller') is not None
-                
-                # Una listing valida ha URI con /sell/item/ E prezzo
-                if '/sell/item/' in uri and (has_price or has_seller):
-                    marketplace_items.append(r)
-            
-            logger.info(f"   ✅ {len(marketplace_items)} listings trovate")
-            return marketplace_items
+            return {
+                'num_for_sale': num_for_sale,
+                'price': price,
+                'currency': currency,
+                'timestamp': time.time()
+            }
+        elif response.status_code == 404:
+            # Release non trovata o senza stats
+            return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
         else:
-            logger.error(f"   ❌ API error {response.status_code}")
+            logger.error(f"❌ Stats API error {response.status_code} per {release_id}")
             
     except Exception as e:
-        logger.error(f"   ❌ Errore: {e}")
+        logger.error(f"❌ Errore stats {release_id}: {e}")
     
-    return []
+    return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MARKETPLACE CHECK FINALE ==================
-def check_marketplace_finale():
-    """Versione FINALE che FUNZIONA"""
-    logger.info("🔄 Controllo marketplace FINALE...")
+# ================== MONITORAGGIO STATS ==================
+def monitor_stats_changes():
+    """Monitora CAMBIAMENTI nelle statistiche - QUESTA È LA MAGIA!"""
+    logger.info("📊 Monitoraggio statistiche marketplace...")
     
     wants = get_wantlist()
     if not wants:
         return 0
     
-    seen = load_seen()
-    new_listings = 0
+    # Carica stato precedente
+    stats_cache = load_stats_cache()
+    changes_detected = 0
     
-    logger.info(f"📊 Wantlist: {len(wants)} articoli")
-    logger.info(f"👁️ ID già visti: {len(seen)}")
+    # Controlla 50 release per ciclo (massima copertura)
+    check_count = min(50, len(wants))
     
-    # 40 release per ciclo (massimo per performance)
-    check_count = min(40, len(wants))
-    
-    # Strategia: 20 recenti + 20 casuali
+    # Strategia: 20 recenti + 30 casuali
     recent = wants[:20]
     if len(wants) > 20:
-        random_sample = random.sample(wants[20:], min(20, len(wants[20:])))
+        random_sample = random.sample(wants[20:], min(30, len(wants[20:])))
         releases_to_check = recent + random_sample
     else:
         releases_to_check = recent
@@ -204,7 +170,7 @@ def check_marketplace_finale():
     logger.info(f"🔍 Controllo {len(releases_to_check)} release...")
     
     for i, item in enumerate(releases_to_check):
-        release_id = item.get('id')
+        release_id = str(item.get('id'))
         basic_info = item.get('basic_information', {})
         title = basic_info.get('title', 'Sconosciuto')
         artists = basic_info.get('artists', [{}])
@@ -212,112 +178,144 @@ def check_marketplace_finale():
         
         logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
         
-        # CERCA LISTINGS PER RELEASE ID
-        listings = search_marketplace_listings(None, release_id)
+        # Ottieni stats CORRENTI
+        current_stats = get_release_stats(release_id)
+        current_count = current_stats['num_for_sale']
+        current_price = current_stats['price']
+        current_currency = current_stats['currency']
         
-        # Se non trova, cerca per titolo e artista
-        if not listings:
-            search_query = f"{artist} {title}"
-            listings = search_marketplace_listings(search_query)
+        # Recupera stats PRECEDENTI
+        previous = stats_cache.get(release_id, {})
+        previous_count = previous.get('num_for_sale', -1)  # -1 = mai visto
         
-        if not listings:
-            logger.info(f"   ℹ️ Nessuna listing trovata")
-            continue
-        
-        for listing in listings:
-            # Estrai listing ID dall'URI
-            uri = listing.get('uri', '')
-            listing_id = None
+        # --- LOGICA DI RILEVAMENTO CAMBIAMENTI ---
+        if previous_count == -1:
+            # Prima volta che controlliamo questa release
+            logger.info(f"   📝 Prima rilevazione: {current_count} copie")
             
-            if '/sell/item/' in uri:
-                listing_id = uri.split('/')[-1]
+        elif current_count != previous_count:
+            # CAMBIAMENTO RILEVATO! 🎉
+            diff = current_count - previous_count
             
-            if not listing_id:
-                continue
+            if diff > 0:
+                # AUMENTO = NUOVE COPIE IN VENDITA!
+                emoji = "🆕"
+                action = f"+{diff} NUOVE COPIE"
+                description = f"Aggiunte {diff} nuova/e copia/e"
+            else:
+                # DIMINUZIONE = COPIE VENDUTE/RIMOSSE
+                emoji = "📉"
+                action = f"{diff} copie"  # es: "-2 copie"
+                description = f"Rimosse {abs(diff)} copia/e"
             
-            if listing_id in seen:
-                continue
+            # Formatta prezzo
+            price_display = f"{current_currency} {current_price}" if current_price != 'N/D' else 'N/D'
             
-            # Dati della listing
-            price = listing.get('formatted_price') or listing.get('price', 'N/D')
-            seller_info = listing.get('seller', {})
-            seller = seller_info.get('username', 'N/D') if seller_info else 'N/D'
-            condition = listing.get('condition', 'N/D')
-            
-            # URL REALE
-            item_url = f"https://www.discogs.com/sell/item/{listing_id}"
-            
-            logger.info(f"   🛒 TROVATA! {listing_id}: {price} da {seller}")
-            logger.info(f"   🔗 {item_url}")
-            
-            # Invia notifica
+            # Costruisci messaggio
             msg = (
-                f"🆕 <b>COPIA DISPONIBILE!</b>\n\n"
+                f"{emoji} <b>CAMBIAMENTO DETECTED!</b>\n\n"
                 f"🎸 <b>{artist}</b>\n"
-                f"💿 {title}\n"
-                f"💰 <b>{price}</b>\n"
-                f"👤 {seller}\n"
-                f"⭐ {condition}\n\n"
-                f"🔗 <a href='{item_url}'>VEDI SU DISCOGS</a>"
+                f"💿 {title}\n\n"
+                f"📊 <b>{action}</b>\n"
+                f"💰 Prezzo più basso: <b>{price_display}</b>\n"
+                f"📦 Totale ora: <b>{current_count} copie</b>\n\n"
+                f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI TUTTE LE COPIE</a>"
             )
             
             if send_telegram(msg):
-                seen.add(listing_id)
-                new_listings += 1
-                logger.info(f"   📤 NOTIFICA INVIATA!")
-                break  # Una notifica per release
+                changes_detected += 1
+                logger.info(f"   🎯 CAMBIAMENTO: {description} (ora: {current_count})")
+            else:
+                logger.error(f"   ❌ Errore invio notifica")
+        
+        elif current_count > 0 and current_count == previous_count:
+            # Nessun cambiamento, ma ci sono copie
+            logger.info(f"   ℹ️ Stabili: {current_count} copie")
+        else:
+            # Nessuna copia, nessun cambiamento
+            logger.info(f"   ℹ️ Nessuna copia (invariato)")
+        
+        # Aggiorna cache
+        stats_cache[release_id] = {
+            'num_for_sale': current_count,
+            'price': current_price,
+            'currency': current_currency,
+            'artist': artist,
+            'title': title,
+            'last_check': time.time()
+        }
         
         # Pausa per rate limiting
-        time.sleep(random.uniform(2, 3))
+        time.sleep(random.uniform(1, 1.5))
     
-    if new_listings > 0:
-        save_seen(seen)
-        logger.info(f"✅ {new_listings} nuove listings notificate!")
-    else:
-        logger.info("ℹ️ Nessuna nuova listing trovata")
+    # Salva cache aggiornata
+    save_stats_cache(stats_cache)
     
-    return new_listings
+    logger.info(f"✅ Rilevati {changes_detected} cambiamenti!")
+    return changes_detected
 
 # ================== FLASK APP ==================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
+    cache = load_stats_cache()
+    monitored = len(cache)
+    with_stats = sum(1 for v in cache.values() if v.get('num_for_sale', 0) > 0)
+    
     return f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>🤖 Discogs Bot - FINALE</title>
+        <title>📊 Discogs Stats Monitor</title>
+        <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
             .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; }}
-            .success {{ background: #d4edda; padding: 20px; border-radius: 5px; }}
-            .btn {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; 
-                    text-decoration: none; border-radius: 5px; margin: 5px; }}
+            .stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
+            .card {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; }}
+            .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 5px; }}
+            .btn:hover {{ background: #45a049; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🤖 Discogs Bot - VERSIONE FINALE</h1>
+            <h1>📊 Discogs Stats Monitor</h1>
             
-            <div class="success">
-                <h3>✅ ENDPOINT FUNZIONANTE</h3>
-                <p><strong>Utente:</strong> {USERNAME}</p>
-                <p><strong>Release/ciclo:</strong> 40</p>
-                <p><strong>Intervallo:</strong> {CHECK_INTERVAL//60} minuti</p>
-                <p><strong>Status:</strong> 🟢 ONLINE</p>
+            <div class="stats">
+                <div class="card">
+                    <h3>📈 Release Monitorate</h3>
+                    <p style="font-size: 2em; font-weight: bold;">{monitored}</p>
+                </div>
+                <div class="card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                    <h3>🛒 Con Copie in Vendita</h3>
+                    <p style="font-size: 2em; font-weight: bold;">{with_stats}</p>
+                </div>
+            </div>
+            
+            <div style="background: #e3f2fd; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                <h3>🎯 COSA RILEVA QUESTO BOT:</h3>
+                <ul style="font-size: 1.1em;">
+                    <li>✅ <strong>NUOVE COPIE</strong> appena messe in vendita (+1, +2, +5...)</li>
+                    <li>✅ <strong>COPIE VENDUTE/RIMOSSE</strong> (-1, -2, -5...)</li>
+                    <li>✅ <strong>PREZZO PIÙ BASSO</strong> che cambia</li>
+                    <li>✅ <strong>DA 0 A 1+</strong> quando esce la prima copia</li>
+                    <li>✅ <strong>DA 1+ A 0</strong> quando l'ultima copia viene venduta</li>
+                </ul>
+                <p style="font-size: 0.9em; color: #666;">⏱ Controllo ogni 3 minuti - Notifiche IMMEDIATE!</p>
             </div>
             
             <h3>🔧 Controlli</h3>
-            <a class="btn" href="/check">🚀 Controllo Marketplace</a>
+            <a class="btn" href="/check">🚀 Controllo STATS</a>
             <a class="btn" href="/test">🧪 Test Telegram</a>
             <a class="btn" href="/logs">📄 Logs</a>
-            <a class="btn" href="/force-check">⚡ Test Rapido</a>
+            <a class="btn" href="/reset">🔄 Reset Cache</a>
+            <a class="btn" href="/debug">🔍 Debug Release</a>
             
-            <h3>📊 Istruzioni</h3>
-            <p>1. Vai su <strong>/force-check?release_id=14809291</strong> per test</p>
-            <p>2. Controlla i logs per vedere se trova listings</p>
-            <p>3. Se trova, le notifiche arriveranno automaticamente</p>
+            <h3>📊 Info Sistema</h3>
+            <p><strong>Utente:</strong> {USERNAME}</p>
+            <p><strong>Intervallo:</strong> 3 minuti</p>
+            <p><strong>Release/ciclo:</strong> 50</p>
         </div>
     </body>
     </html>
@@ -325,57 +323,68 @@ def home():
 
 @app.route("/check")
 def manual_check():
-    Thread(target=check_marketplace_finale, daemon=True).start()
-    return "<h1>🚀 Controllo avviato!</h1><a href='/'>↩️ Home</a>", 200
+    Thread(target=monitor_stats_changes, daemon=True).start()
+    return "<h1>🚀 Monitoraggio STATS avviato!</h1><p>Controlla i logs per i cambiamenti.</p><a href='/'>↩️ Home</a>", 200
 
-@app.route("/force-check")
-def force_check():
-    """Test forzato con release specifica"""
-    release_id = request.args.get('release_id', '14809291')
+@app.route("/debug")
+def debug_release():
+    """Test manuale per una release specifica"""
+    release_id = request.args.get('id', '14809291')
     
-    logger.info(f"⚡ TEST FORZATO per release {release_id}")
+    stats = get_release_stats(release_id)
     
-    listings = search_marketplace_listings(None, release_id)
+    html = f"<h2>🔍 Debug Release {release_id}</h2>"
+    html += f"<p>📊 Copie in vendita: <b>{stats['num_for_sale']}</b></p>"
+    html += f"<p>💰 Prezzo più basso: <b>{stats['currency']} {stats['price']}</b></p>"
+    html += f"<p>🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>Vedi su Discogs</a></p>"
+    html += "<br><a href='/'>↩️ Home</a>"
     
-    html = f"<h2>Test Release {release_id}</h2>"
-    html += f"<p>Trovate {len(listings)} listings</p><ul>"
-    
-    for l in listings[:5]:
-        uri = l.get('uri', '')
-        lid = uri.split('/')[-1] if '/sell/item/' in uri else 'N/A'
-        price = l.get('formatted_price') or l.get('price', 'N/D')
-        html += f"<li>🛒 {lid}: {price}</li>"
-    
-    html += "</ul><a href='/'>↩️ Home</a>"
     return html, 200
+
+@app.route("/reset")
+def reset_cache():
+    """Resetta la cache delle statistiche"""
+    save_stats_cache({})
+    return "<h1>🔄 Cache resettata!</h1><p>Ora monitorerà TUTTE le release come 'prime rilevazioni'.</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/test")
 def test_telegram():
-    success = send_telegram(f"🧪 Test Bot FINALE\n{datetime.now().strftime('%H:%M %d/%m/%Y')}")
+    success = send_telegram(
+        f"🧪 <b>Test Stats Monitor</b>\n\n"
+        f"✅ Sistema online - Monitoraggio CAMBIAMENTI attivo!\n"
+        f"👤 {USERNAME}\n"
+        f"⏰ Controllo ogni 3 minuti\n"
+        f"📊 Rileva: nuove copie, vendite, variazioni prezzo\n"
+        f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
+    )
     return "✅ Test inviato" if success else "❌ Errore", 200
 
 @app.route("/logs")
 def view_logs():
     try:
         with open(LOG_FILE, "r") as f:
-            logs = f.read().splitlines()[-100:]
-        return "<pre>" + "<br>".join(logs) + "</pre><br><a href='/'>↩️ Home</a>", 200
+            logs = f.read().splitlines()[-200:]
+        return "<pre style='background:#000; color:#0f0; padding:20px;'>" + "<br>".join(logs) + "</pre><br><a href='/'>↩️ Home</a>", 200
     except:
         return "<pre>Nessun log</pre><a href='/'>↩️ Home</a>", 200
 
 # ================== MAIN LOOP ==================
 def main_loop():
+    """Loop ogni 3 minuti"""
     time.sleep(10)
+    
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Controllo - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio STATS - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
-            check_marketplace_finale()
+            monitor_stats_changes()
             
+            logger.info(f"💤 Pausa 3 minuti...")
             for _ in range(CHECK_INTERVAL):
                 time.sleep(1)
+                
         except Exception as e:
             logger.error(f"❌ Loop error: {e}")
             time.sleep(60)
@@ -383,13 +392,23 @@ def main_loop():
 # ================== STARTUP ==================
 if __name__ == "__main__":
     logger.info('='*70)
-    logger.info("🤖 DISCOGS BOT - VERSIONE FINALE")
+    logger.info("📊 DISCOGS STATS MONITOR - RILEVA CAMBIAMENTI IN TEMPO REALE")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
+    logger.info(f"🔍 Release/ciclo: 50")
     logger.info('='*70)
     
-    send_telegram(f"🤖 Bot FINALE avviato!\n👤 {USERNAME}\n✅ 40 release/ciclo")
+    send_telegram(
+        f"📊 <b>Discogs Stats Monitor Avviato!</b>\n\n"
+        f"✅ Rileva CAMBIAMENTI in tempo reale:\n"
+        f"• 🆕 Nuove copie in vendita\n"
+        f"• 📉 Copie vendute/rimosse\n"
+        f"• 💰 Variazioni prezzo più basso\n\n"
+        f"👤 {USERNAME}\n"
+        f"⏰ Controllo ogni 3 minuti\n"
+        f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
+    )
     
     Thread(target=main_loop, daemon=True).start()
     
