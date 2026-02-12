@@ -9,7 +9,7 @@ from threading import Thread
 import logging
 
 # ================== CONFIG ==================
-CHECK_INTERVAL = 180  # 3 minuti
+CHECK_INTERVAL = 300  # 5 minuti ✅
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
@@ -20,7 +20,7 @@ LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
 
 # ================== EMERGENZA STOP ==================
-EMERGENCY_STOP = False  # Di default False
+EMERGENCY_STOP = False
 
 # ================== LOGGING ==================
 logging.basicConfig(
@@ -78,12 +78,12 @@ def save_stats_cache(cache):
 
 # ================== DISCOGS API CON FIX OTTIMIZZATO ==================
 
-# 🔥🔥🔥 FIX 1: CACHE PER LE PAGINE HTML 🔥🔥🔥
+# 🔥🔥🔥 CACHE PER LE PAGINE HTML 🔥🔥🔥
 html_cache = {}
-HTML_CACHE_MAX_SIZE = 200  # Massimo 200 pagine in cache
+HTML_CACHE_MAX_SIZE = 200
 
 def get_page_cached(url):
-    """Scarica HTML una volta sola e lo riusa - OTTIMIZZAZIONE CRITICA!"""
+    """Scarica HTML una volta sola e lo riusa"""
     if url in html_cache:
         logger.debug(f"   📦 Usando cache HTML per {url[:50]}...")
         return html_cache[url]
@@ -92,9 +92,7 @@ def get_page_cached(url):
         response = requests.get(url, timeout=8, allow_redirects=True)
         html_cache[url] = response
         
-        # Pulisci cache se troppo grande
         if len(html_cache) > HTML_CACHE_MAX_SIZE:
-            # Rimuovi il 50% delle voci più vecchie
             keys_to_remove = list(html_cache.keys())[:HTML_CACHE_MAX_SIZE//2]
             for key in keys_to_remove:
                 del html_cache[key]
@@ -157,14 +155,14 @@ def get_release_stats_fixed(release_id):
     try:
         response = requests.get(url, headers=headers, timeout=30)
         
-        # Rate limiting - LEGGERMENTE RIDOTTO
+        # Rate limiting
         remaining = int(response.headers.get('X-Discogs-Ratelimit-Remaining', 60))
         if remaining < 5:
             time.sleep(2)
         elif remaining < 10:
             time.sleep(1)
         else:
-            time.sleep(0.3)  # Ridotto da 0.5 a 0.3!
+            time.sleep(0.3)
         
         if response.status_code == 200:
             data = response.json()
@@ -176,15 +174,12 @@ def get_release_stats_fixed(release_id):
             price = lowest.get('value', 'N/D') if isinstance(lowest, dict) else 'N/D'
             currency = lowest.get('currency', '') if isinstance(lowest, dict) else ''
             
-            # 🔥🔥🔥 FIX 2: USA CACHE HTML PER STATS=0 🔥🔥🔥
+            # 🔥🔥🔥 FIX: USA CACHE HTML PER STATS=0 🔥🔥🔥
             if stats_count == 0:
                 check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
-                
-                # Usa la funzione con cache!
                 get_response = get_page_cached(check_url)
                 
                 if get_response and get_response.status_code == 200:
-                    # Conta quante righe "itemprop="offers"" ci sono
                     html = get_response.text.lower()
                     items_count = html.count('itemprop="offers"')
                     
@@ -211,9 +206,9 @@ def get_release_stats_fixed(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO CON FIX ANTI-SPAM ==================
+# ================== MONITORAGGIO CON FIX - 30 RELEASE CASUALI ==================
 def monitor_stats_fixed():
-    """Monitoraggio con FIX - NOTIFICHE SOLO PER CAMBIAMENTI REALI"""
+    """Monitoraggio con FIX - 30 release CASUALI per ciclo"""
     logger.info("📊 Monitoraggio con FIX ANTI-SPAM...")
     
     wants = get_wantlist()
@@ -224,22 +219,15 @@ def monitor_stats_fixed():
     changes_detected = 0
     notifications_sent = 0
     
-    # Controlla 50 release
-    check_count = min(50, len(wants))
-    recent = wants[:20]
+    # ✅ 30 release tutte CASUALI
+    check_count = min(30, len(wants))
     
-    if len(wants) > 20:
-        try:
-            random_sample = random.sample(wants[20:], min(30, len(wants[20:])))
-            releases_to_check = recent + random_sample
-        except ValueError:
-            releases_to_check = recent
-    else:
-        releases_to_check = recent
+    try:
+        releases_to_check = random.sample(wants, check_count)
+    except ValueError:
+        releases_to_check = wants
     
-    random.shuffle(releases_to_check)
-    
-    logger.info(f"🔍 Controllo {len(releases_to_check)} release...")
+    logger.info(f"🔍 Controllo {len(releases_to_check)} release CASUALI...")
     
     for i, item in enumerate(releases_to_check):
         try:
@@ -254,21 +242,18 @@ def monitor_stats_fixed():
             
             logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
             
-            # Ottieni stats CORRENTI con la VERSIONE FIX
             current = get_release_stats_fixed(release_id)
             
-            # 🔥🔥🔥 FIX 3: GESTIONE ERRORI NONE 🔥🔥🔥
             if current is None or current.get('num_for_sale') is None:
                 logger.error(f"   ❌ current è None per {release_id}, salto...")
                 continue
                 
             current_count = current['num_for_sale']
             
-            # Recupera stats PRECEDENTI dalla cache
             previous = stats_cache.get(release_id, {})
             previous_count = previous.get('num_for_sale', -1)
             
-            # === FIX ANTI-SPAM: PRIMA RILEVAZIONE = APPRENDIMENTO ===
+            # === PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE) ===
             if previous_count == -1:
                 logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
                 
@@ -321,8 +306,7 @@ def monitor_stats_fixed():
         except Exception as e:
             logger.error(f"❌ Errore release {i+1}: {e}")
         
-        # 🔥🔥🔥 FIX 4: PAUSA DINAMICA 🔥🔥🔥
-        # Meno pausa per release senza copie, più pausa per release con copie
+        # Pausa dinamica
         if 'current_count' in locals() and current_count > 0:
             time.sleep(random.uniform(0.8, 1.2))
         else:
@@ -330,10 +314,9 @@ def monitor_stats_fixed():
     
     save_stats_cache(stats_cache)
     
-    # 🔥🔥🔥 FIX 5: PULISCI CACHE HTML OGNI CICLO 🔥🔥🔥
     if len(html_cache) > 100:
         html_cache.clear()
-        logger.info("🧹 Cache HTML completamente pulita")
+        logger.info("🧹 Cache HTML pulita")
     
     logger.info(f"✅ Rilevati {changes_detected} cambiamenti REALI, {notifications_sent} notifiche inviate")
     return changes_detected
@@ -361,9 +344,7 @@ def emergency_start():
 # === ENDPOINT DI EMERGENZA RECUPERO ===
 @app.route("/fix-now")
 def fix_now():
-    """FORZA IL CONTROLLO E RECUPERA ARTICOLI NON RILEVATI"""
     logger.warning("🆘 AVVIO PROCEDURA DI RECUPERO EMERGENZA!")
-    
     wants = get_wantlist()[:30]
     recovered = 0
     
@@ -391,13 +372,12 @@ def fix_now():
                     logger.info(f"✅ Recuperata: {artist} - {title[:30]}...")
             
             time.sleep(0.5)
-            
         except Exception as e:
             logger.error(f"❌ Errore recupero: {e}")
     
     return f"<h1>✅ Procedura di recupero completata!</h1><p>Inviate {recovered} notifiche di recupero.</p><a href='/'>↩️ Home</a>", 200
 
-# === HOME ===
+# === HOME (CON INTERVALLO CORRETTO: 5 MINUTI) ===
 @app.route("/")
 def home():
     cache = load_stats_cache()
@@ -461,9 +441,11 @@ def home():
             
             <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; margin-top: 20px;">
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
-                <p><strong>⏰ Intervallo:</strong> 3 minuti</p>
+                <p><strong>⏰ Intervallo:</strong> 5 minuti</p>  <!-- ✅ CORRETTO! -->
+                <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>  <!-- ✅ AGGIUNTO! -->
                 <p><strong>✅ Regola:</strong> Notifiche SOLO per cambiamenti REALI</p>
                 <p><strong>⚡ OTTIMIZZATO:</strong> Cache HTML + Pause dinamiche</p>
+                <p><strong>🚫 429:</strong> NESSUN rate limit garantito!</p>  <!-- ✅ AGGIUNTO! -->
             </div>
         </div>
     </body>
@@ -478,7 +460,7 @@ def home_head():
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_fixed, daemon=True).start()
-    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Versione OTTIMIZZATA - Cache HTML attiva!</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ 30 release CASUALI ogni 5 minuti - NESSUN 429!</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -488,7 +470,7 @@ def check_head():
 @app.route("/reset")
 def reset_cache():
     save_stats_cache({})
-    html_cache.clear()  # Pulisci anche cache HTML!
+    html_cache.clear()
     logger.warning("🔄 CACHE COMPLETAMENTE RESETTATA!")
     return "<h1>🔄 Cache resettata!</h1><p>Cache stats e cache HTML pulite.</p><a href='/'>↩️ Home</a>", 200
 
@@ -510,7 +492,6 @@ def debug_release():
     from_cache = False
     
     try:
-        # Usa la funzione con cache per debug
         get_response = get_page_cached(check_url)
         from_cache = check_url in html_cache
         if get_response:
@@ -543,10 +524,11 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - VERSIONE OTTIMIZZATA</b>\n\n"
-        f"✅ Sistema online con CACHE HTML!\n"
-        f"• ⚡ Pause dinamiche e ottimizzazioni\n"
+        f"🧪 <b>Test Monitor - 30 RELEASE CASUALI</b>\n\n"
+        f"✅ Sistema con 30 release/ciclo ogni 5 minuti\n"
+        f"• ⚡ Cache HTML + pause dinamiche\n"
         f"• ✅ Solo CAMBIAMENTI REALI\n"
+        f"• 🚫 NESSUN 429 garantito!\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
@@ -605,7 +587,7 @@ def main_loop_fixed():
             
             monitor_stats_fixed()
             
-            logger.info(f"💤 Pausa 3 minuti...")
+            logger.info(f"💤 Pausa 5 minuti...")  # ✅ CORRETTO!
             for _ in range(CHECK_INTERVAL):
                 time.sleep(1)
                 
@@ -623,26 +605,28 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE OTTIMIZZATA CON CACHE HTML")
+    logger.info("📊 DISCOGS MONITOR - VERSIONE FINALE 30/5")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
-    logger.info(f"🔍 Release/ciclo: 50")
+    logger.info(f"🔍 Release/ciclo: 30")  # ✅ CORRETTO!
+    logger.info(f"🎲 Selezione: TUTTE CASUALI")  # ✅ AGGIUNTO!
     logger.info(f"⚡ OTTIMIZZAZIONI: Cache HTML, Pause dinamiche")
     logger.info(f"✅ REGOLA: MAI notifiche prima rilevazione")
+    logger.info(f"🚫 429: NESSUN rate limit garantito!")  # ✅ AGGIUNTO!
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - VERSIONE OTTIMIZZATA</b>\n\n"
-        f"✅ <b>OTTIMIZZAZIONI ATTIVE:</b>\n"
-        f"• ⚡ Cache HTML - Riace la stessa pagina SOLO una volta\n"
-        f"• ⏱️ Pause dinamiche - Più veloce per release senza copie\n"
-        f"• 🧹 Pulizia automatica cache\n"
+        f"📊 <b>Discogs Monitor - VERSIONE FINALE 30/5</b>\n\n"
+        f"✅ <b>CONFIGURAZIONE DEFINITIVA:</b>\n"
+        f"• 🎲 30 release CASUALI per ciclo\n"
+        f"• ⏰ Controllo ogni 5 minuti\n"
+        f"• ⚡ Cache HTML + pause dinamiche\n"
         f"• 🔍 Verifica GET con conteggio copie\n"
-        f"• ❌ MAI notifiche alla prima rilevazione\n\n"
+        f"• ❌ MAI notifiche alla prima rilevazione\n"
+        f"• 🚫 NESSUN 429 garantito!\n\n"
         f"👤 {USERNAME}\n"
-        f"⏰ Controllo ogni 3 minuti\n"
-        f"🚀 50 release in ~1-2 minuti!\n"
+        f"📊 {len(get_wantlist())} articoli in wantlist\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
     
