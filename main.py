@@ -79,7 +79,7 @@ def save_stats_cache(cache):
     except Exception as e:
         logger.error(f"❌ Errore salvataggio cache: {e}")
 
-# ================== DISCOGS API CON FIX ==================
+# ================== DISCOGS API CON FIX POTENZIATO ==================
 def get_wantlist():
     """Ottieni wantlist completa"""
     all_wants = []
@@ -92,7 +92,7 @@ def get_wantlist():
         params = {'page': page, 'per_page': 100}
         headers = {
             "Authorization": f"Discogs token={DISCOGS_TOKEN}", 
-            "User-Agent": "DiscogsStatsBot/5.0-FIX"
+            "User-Agent": "DiscogsStatsBot/6.0-FIX"
         }
         
         try:
@@ -124,11 +124,10 @@ def get_wantlist():
 
 def get_release_stats_fixed(release_id):
     """
-    VERSIONE FIX - NON SI FIDA DI STATS=0
-    Verifica sempre se la pagina delle listings esiste
+    VERSIONE SUPER-FIX - USA GET PER VERIFICARE LA PAGINA!
     """
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsStatsBot/5.0-FIX"}
+    headers = {"User-Agent": "DiscogsStatsBot/6.0-FIX"}
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
@@ -152,19 +151,24 @@ def get_release_stats_fixed(release_id):
             price = lowest.get('value', 'N/D') if isinstance(lowest, dict) else 'N/D'
             currency = lowest.get('currency', '') if isinstance(lowest, dict) else ''
             
-            # 🔴 FIX CRITICO: Se stats dice 0, VERIFICHIAMO CON HEAD REQUEST
+            # 🔴🔴🔴 FIX CRITICO: USA GET NON HEAD!
             if stats_count == 0:
                 check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
                 try:
-                    head_response = requests.head(check_url, timeout=5, allow_redirects=True)
-                    if head_response.status_code == 200:
-                        # La pagina esiste! Registriamo come 1 per la cache
-                        logger.warning(f"   ⚠️ Stats=0 ma pagina esiste! Forzo a 1 per cache")
-                        stats_count = 1
-                        price = "Verifica manuale"
-                        currency = ""
+                    # USA GET CON TIMEOUT BREVE - FUNZIONA SEMPRE!
+                    get_response = requests.get(check_url, timeout=8, allow_redirects=True)
+                    if get_response.status_code == 200:
+                        # Conta quante righe "itemprop="offers"" ci sono
+                        html = get_response.text.lower()
+                        items_count = html.count('itemprop="offers"')
+                        
+                        if items_count > 0:
+                            logger.warning(f"   ⚠️ STATS=0 MA PAGINA TROVATA CON {items_count} COPIE!")
+                            stats_count = items_count
+                            price = f"~{items_count} copie"
+                            currency = ""
                 except Exception as e:
-                    logger.debug(f"   ℹ️ Head request fallita: {e}")
+                    logger.debug(f"   ℹ️ GET request fallita: {e}")
             
             return {
                 'num_for_sale': stats_count,
@@ -297,7 +301,7 @@ def monitor_stats_fixed():
     logger.info(f"✅ Rilevati {changes_detected} cambiamenti REALI, {notifications_sent} notifiche inviate")
     return changes_detected
 
-# ================== FLASK APP ==================
+# ================== FLASK APP CON HOME SEMPLIFICATA ==================
 app = Flask(__name__)
 
 # === ENDPOINT EMERGENZA STOP/START ===
@@ -335,14 +339,14 @@ def fix_now():
             artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
             
             check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
-            head_response = requests.head(check_url, timeout=5, allow_redirects=True)
+            get_response = requests.get(check_url, timeout=8, allow_redirects=True)
             
-            if head_response.status_code == 200:
+            if get_response.status_code == 200 and 'itemprop="offers"' in get_response.text.lower():
                 msg = (
                     f"🆘 <b>RECUPERO EMERGENZA</b>\n\n"
                     f"🎸 <b>{artist}</b>\n"
                     f"💿 {title}\n\n"
-                    f"⚠️ Questa release HA UNA PAGINA DI VENDITA\n"
+                    f"⚠️ Questa release HA COPIE IN VENDITA!\n"
                     f"🔗 <a href='{check_url}'>VERIFICA MANUALMENTE</a>"
                 )
                 if send_telegram(msg):
@@ -356,7 +360,7 @@ def fix_now():
     
     return f"<h1>✅ Procedura di recupero completata!</h1><p>Inviate {recovered} notifiche di recupero.</p><a href='/'>↩️ Home</a>", 200
 
-# === HOME ===
+# === HOME SEMPLIFICATA (FIX PER ERRORE 500) ===
 @app.route("/")
 def home():
     cache = load_stats_cache()
@@ -364,68 +368,66 @@ def home():
     with_stats = sum(1 for v in cache.values() if v.get('num_for_sale', 0) > 0)
     
     status = "🟢 ONLINE" if not EMERGENCY_STOP else "🔴 BLOCCATO"
-    status_color = "green" if not EMERGENCY_STOP else "red"
     
     return f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - ANTI-SPAM</title>
+        <title>📊 Discogs Monitor</title>
+        <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
             .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; }}
+            h1 {{ color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }}
+            .status {{ display: inline-block; padding: 10px 20px; border-radius: 5px; color: white; font-weight: bold; }}
             .stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
-            .card {{ background: #4CAF50; color: white; padding: 20px; border-radius: 10px; }}
-            .warning {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin: 20px 0; }}
-            .success {{ background: #d4edda; border-left: 4px solid #28a745; padding: 20px; margin: 20px 0; }}
-            .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 12px 24px; 
-                    text-decoration: none; border-radius: 5px; margin: 5px; }}
+            .stat-card {{ background: #4CAF50; color: white; padding: 20px; border-radius: 10px; text-align: center; }}
+            .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 10px 20px; 
+                    text-decoration: none; border-radius: 5px; margin: 5px; font-size: 16px; }}
             .btn-stop {{ background: #dc3545; }}
             .btn-start {{ background: #28a745; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - ANTI-SPAM</h1>
+            <h1>📊 Discogs Monitor</h1>
             
-            <div style="margin-bottom: 20px; padding: 15px; background: {status_color}; color: white; border-radius: 10px; text-align: center;">
-                <h2 style="margin:0;">{status}</h2>
+            <div style="margin: 20px 0; text-align: center;">
+                <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
+                    {status}
+                </span>
             </div>
             
             <div class="stats">
-                <div class="card">
+                <div class="stat-card">
                     <h3>📈 Release Monitorate</h3>
-                    <p style="font-size: 2em;">{monitored}</p>
+                    <p style="font-size: 2.5em; margin: 10px 0;">{monitored}</p>
                 </div>
-                <div class="card" style="background: #f44336;">
-                    <h3>🛒 Con Copie</h3>
-                    <p style="font-size: 2em;">{with_stats}</p>
+                <div class="stat-card" style="background: #dc3545;">
+                    <h3>🛒 Con Copie in Vendita</h3>
+                    <p style="font-size: 2.5em; margin: 10px 0;">{with_stats}</p>
                 </div>
             </div>
             
-            <div class="success">
-                <h3>✅ ANTI-SPAM ATTIVO:</h3>
-                <ul>
-                    <li>❌ MAI notifiche alla prima rilevazione</li>
-                    <li>✅ Notifiche SOLO per CAMBIAMENTI REALI</li>
-                    <li>🔴 Endpoint /stop per bloccare emergenza</li>
-                    <li>🟢 Endpoint /start per riattivare</li>
-                </ul>
+            <div style="margin: 30px 0; text-align: center;">
+                <h3>🔧 Controlli Rapidi</h3>
+                <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
+                    <a class="btn" href="/check">🚀 Controllo</a>
+                    <a class="btn btn-stop" href="/stop">🔴 STOP</a>
+                    <a class="btn btn-start" href="/start">🟢 START</a>
+                    <a class="btn" href="/fix-now">🆘 Recupero</a>
+                    <a class="btn" href="/test">🧪 Test</a>
+                    <a class="btn" href="/reset">🔄 Reset Cache</a>
+                    <a class="btn" href="/logs">📄 Logs</a>
+                </div>
             </div>
             
-            <h3>🔧 Controlli</h3>
-            <a class="btn" href="/check">🚀 Controllo</a>
-            <a class="btn btn-stop" href="/stop">🔴 STOP EMERGENZA</a>
-            <a class="btn btn-start" href="/start">🟢 START</a>
-            <a class="btn" href="/fix-now">🆘 Recupero</a>
-            <a class="btn" href="/test">🧪 Test</a>
-            <a class="btn" href="/reset">🔄 Reset Cache</a>
-            <a class="btn" href="/logs">📄 Logs</a>
-            
-            <h3>📊 Info</h3>
-            <p><strong>Utente:</strong> {USERNAME}</p>
-            <p><strong>Stato:</strong> {status}</p>
-            <p><strong>Regola:</strong> 📢 Notifiche SOLO per cambiamenti REALI</p>
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; margin-top: 20px;">
+                <p><strong>👤 Utente:</strong> {USERNAME}</p>
+                <p><strong>⏰ Intervallo:</strong> 3 minuti</p>
+                <p><strong>✅ Regola:</strong> Notifiche SOLO per cambiamenti REALI</p>
+                <p><strong>🔍 Fix attivo:</strong> Verifica GET con conteggio copie</p>
+            </div>
         </div>
     </body>
     </html>
@@ -456,7 +458,7 @@ def reset_cache():
 def reset_head():
     return "", 200
 
-# === DEBUG ===
+# === DEBUG CON FIX ===
 @app.route("/debug")
 def debug_release():
     release_id = request.args.get('id', '14809291')
@@ -464,19 +466,24 @@ def debug_release():
     cache = load_stats_cache()
     cached = cache.get(release_id, {})
     
+    # Verifica pagina con GET
     check_url = f"https://www.discogs.com/sell/list?release_id={release_id}"
     page_exists = False
+    items_count = 0
     try:
-        head = requests.head(check_url, timeout=5, allow_redirects=True)
-        page_exists = head.status_code == 200
+        get_response = requests.get(check_url, timeout=8, allow_redirects=True)
+        page_exists = get_response.status_code == 200
+        if page_exists:
+            items_count = get_response.text.lower().count('itemprop="offers"')
     except:
         pass
     
     html = f"<h2>🔍 Debug Release {release_id}</h2>"
     html += f"<h3>📊 Stats Correnti:</h3>"
-    html += f"<p>Copie: <b>{stats['num_for_sale']}</b></p>"
+    html += f"<p>Copie (API): <b>{stats['num_for_sale']}</b></p>"
     html += f"<p>Prezzo: <b>{stats['currency']} {stats['price']}</b></p>"
     html += f"<p>Pagina esiste: <b>{'✅ SÌ' if page_exists else '❌ NO'}</b></p>"
+    html += f"<p>Copie trovate su pagina: <b>{items_count}</b></p>"
     html += f"<h3>💾 Cache:</h3>"
     html += f"<p>Copie memorizzate: <b>{cached.get('num_for_sale', 'Mai vista')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
@@ -493,9 +500,9 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - ANTI-SPAM</b>\n\n"
-        f"✅ Sistema online\n"
-        f"• ❌ MAI notifiche alla prima rilevazione\n"
+        f"🧪 <b>Test Monitor - FIX COMPLETO</b>\n\n"
+        f"✅ Sistema online con SUPER-FIX!\n"
+        f"• 🔍 Verifica GET con conteggio copie\n"
         f"• ✅ Solo CAMBIAMENTI REALI\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
@@ -572,18 +579,19 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE ANTI-SPAM DEFINITIVA")
+    logger.info("📊 DISCOGS MONITOR - VERSIONE SUPER-FIX DEFINITIVA")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 50")
+    logger.info(f"✅ FIX: GET request con conteggio copie")
     logger.info(f"✅ REGOLA: MAI notifiche prima rilevazione")
-    logger.info(f"✅ REGOLA: Solo CAMBIAMENTI REALI generano notifiche")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - ANTI-SPAM DEFINITIVO</b>\n\n"
-        f"✅ <b>REGOLE FINALI:</b>\n"
+        f"📊 <b>Discogs Monitor - SUPER-FIX DEFINITIVO</b>\n\n"
+        f"✅ <b>FIX POTENZIATI:</b>\n"
+        f"• 🔍 Verifica GET con conteggio copie reali\n"
         f"• ❌ MAI notifiche alla prima rilevazione\n"
         f"• ✅ Solo CAMBIAMENTI REALI generano notifiche\n"
         f"• 🔴 /stop per bloccare emergenza\n"
