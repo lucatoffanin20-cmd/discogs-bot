@@ -18,7 +18,7 @@ USERNAME = os.environ.get("DISCOGS_USERNAME")
 SEEN_FILE = "stats_seen.json"
 LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
-INDEX_FILE = "last_index.txt"  # Nuovo: per tracciare la posizione
+INDEX_FILE = "last_index.txt"
 
 # ================== EMERGENZA STOP ==================
 EMERGENCY_STOP = False
@@ -79,7 +79,6 @@ def save_stats_cache(cache):
 
 # ================== GESTIONE INDICE SEQUENZIALE ==================
 def load_last_index():
-    """Carica l'ultimo indice processato"""
     try:
         if os.path.exists(INDEX_FILE):
             with open(INDEX_FILE, "r") as f:
@@ -89,27 +88,34 @@ def load_last_index():
     return 0
 
 def save_last_index(index):
-    """Salva l'indice corrente"""
     try:
         with open(INDEX_FILE, "w") as f:
             f.write(str(index))
     except Exception as e:
         logger.error(f"❌ Errore salvataggio indice: {e}")
 
-# ================== DISCOGS API - VERSIONE STABILE ==================
+# ================== DISCOGS API - CON ORDINE CORRETTO ==================
 def get_wantlist():
-    """Ottieni wantlist completa"""
+    """
+    📌 Ottieni wantlist completa ORDINATA per data di aggiunta
+    🔴 Più recenti PRIME, più vecchie DOPO
+    """
     all_wants = []
     page = 1
     
-    logger.info(f"📥 Scaricamento wantlist...")
+    logger.info(f"📥 Scaricamento wantlist ordinata...")
     
     while True:
         url = f"https://api.discogs.com/users/{USERNAME}/wants"
-        params = {'page': page, 'per_page': 100}
+        params = {
+            'page': page, 
+            'per_page': 100,
+            'sort': 'added',        # 🔴 Ordina per data di aggiunta
+            'sort_order': 'desc'     # 🔴 Dalla più recente
+        }
         headers = {
             "Authorization": f"Discogs token={DISCOGS_TOKEN}", 
-            "User-Agent": "DiscogsStatsBot/9.0-SEQUENTIAL"
+            "User-Agent": "DiscogsStatsBot/10.0-ORDERED"
         }
         
         try:
@@ -136,20 +142,17 @@ def get_wantlist():
             logger.error(f"❌ Errore wantlist: {e}")
             break
     
-    logger.info(f"✅ Wantlist: {len(all_wants)} articoli")
+    logger.info(f"✅ Wantlist ordinata: {len(all_wants)} articoli (dal più recente al più vecchio)")
     return all_wants
 
 def get_release_stats_stable(release_id):
-    """
-    ✅ VERSIONE STABILE - USA SOLO API STATS
-    """
+    """✅ VERSIONE STABILE - USA SOLO API STATS"""
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsStatsBot/9.0-SEQUENTIAL"}
+    headers = {"User-Agent": "DiscogsStatsBot/10.0-ORDERED"}
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
         
-        # Rate limiting - conservativo
         remaining = int(response.headers.get('X-Discogs-Ratelimit-Remaining', 60))
         if remaining < 5:
             time.sleep(2)
@@ -185,10 +188,10 @@ def get_release_stats_stable(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO SEQUENZIALE ==================
+# ================== MONITORAGGIO SEQUENZIALE ORDINATO ==================
 def monitor_stats_sequential():
-    """Monitoraggio SEQUENZIALE - 30 release in ordine"""
-    logger.info("📊 Monitoraggio SEQUENZIALE...")
+    """Monitoraggio SEQUENZIALE su wantlist ORDINATA"""
+    logger.info("📊 Monitoraggio SEQUENZIALE ORDINATO...")
     
     wants = get_wantlist()
     if not wants:
@@ -198,11 +201,10 @@ def monitor_stats_sequential():
     changes_detected = 0
     notifications_sent = 0
     
-    # 30 release in ordine
     check_count = min(30, len(wants))
     start_index = load_last_index()
     
-    # Prende 30 release in ordine, partendo dall'ultimo indice
+    # Prende 30 release in ordine dall'indice corrente
     releases_to_check = wants[start_index:start_index + check_count]
     
     # Se siamo alla fine, ricomincia da capo
@@ -213,7 +215,6 @@ def monitor_stats_sequential():
     else:
         start_index += check_count
     
-    # Salva l'indice per il prossimo ciclo
     save_last_index(start_index % len(wants))
     
     logger.info(f"🔍 Controllo {len(releases_to_check)} release in ordine (posizione {start_index})...")
@@ -231,7 +232,6 @@ def monitor_stats_sequential():
             
             logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
             
-            # Ottieni stats correnti
             current = get_release_stats_stable(release_id)
             
             if current is None or current.get('num_for_sale') is None:
@@ -240,15 +240,12 @@ def monitor_stats_sequential():
                 
             current_count = current['num_for_sale']
             
-            # Recupera stats precedenti dalla cache
             previous = stats_cache.get(release_id, {})
             previous_count = previous.get('num_for_sale', -1)
             
-            # PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE)
             if previous_count == -1:
                 logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
                 
-            # SOLO CAMBIAMENTI REALI GENERANO NOTIFICHE
             elif current_count != previous_count:
                 diff = current_count - previous_count
                 
@@ -280,7 +277,6 @@ def monitor_stats_sequential():
             elif current_count > 0 and current_count == previous_count:
                 logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
             
-            # AGGIORNA CACHE SOLO SE CAMBIA
             if previous_count != current_count:
                 stats_cache[release_id] = {
                     'num_for_sale': current_count,
@@ -297,14 +293,12 @@ def monitor_stats_sequential():
         except Exception as e:
             logger.error(f"❌ Errore release {i+1}: {e}")
         
-        # Pausa dinamica
         if 'current_count' in locals() and current_count > 0:
             time.sleep(random.uniform(0.8, 1.2))
         else:
             time.sleep(random.uniform(0.3, 0.6))
     
     save_stats_cache(stats_cache)
-    
     logger.info(f"✅ Rilevati {changes_detected} cambiamenti REALI, {notifications_sent} notifiche inviate")
     return changes_detected
 
@@ -364,7 +358,7 @@ def fix_now():
     
     return f"<h1>✅ Procedura di recupero completata!</h1><p>Inviate {recovered} notifiche di recupero.</p><a href='/'>↩️ Home</a>", 200
 
-# === HOME (CON POSIZIONE SEQUENZIALE) ===
+# === HOME ===
 @app.route("/")
 def home():
     cache = load_stats_cache()
@@ -379,7 +373,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - SEQUENZIALE</title>
+        <title>📊 Discogs Monitor - ORDINATO</title>
         <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
@@ -396,7 +390,7 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - VERSIONE SEQUENZIALE</h1>
+            <h1>📊 Discogs Monitor - VERSIONE ORDINATA</h1>
             
             <div style="margin: 20px 0; text-align: center;">
                 <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
@@ -432,8 +426,9 @@ def home():
             <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; margin-top: 20px;">
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
                 <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
-                <p><strong>🔍 Release per ciclo:</strong> 30 (SEQUENZIALI)</p>
+                <p><strong>🔍 Release per ciclo:</strong> 30 (SEQUENZIALI ORDINATE)</p>
                 <p><strong>📌 Posizione attuale:</strong> {current_pos}/{len(wants)}</p>
+                <p><strong>📅 Ordine:</strong> Dalla più RECENTE alla più VECCHIA</p>
                 <p><strong>✅ Modalità:</strong> SOLO API stats</p>
                 <p><strong>🚫 429:</strong> NESSUN rate limit garantito!</p>
             </div>
@@ -446,20 +441,19 @@ def home():
 def home_head():
     return "", 200
 
-# === CHECK (ora usa la versione SEQUENZIALE) ===
+# === CHECK ===
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_sequential, daemon=True).start()
-    return "<h1>🚀 Monitoraggio SEQUENZIALE avviato!</h1><p>✅ 30 release in ordine ogni 5 minuti</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio SEQUENZIALE ORDINATO avviato!</h1><p>✅ 30 release in ordine (dalla più recente)</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
     return "", 200
 
-# === ENDPOINT PROGRESSO ===
+# === PROGRESSO ===
 @app.route("/progress")
 def show_progress():
-    """Mostra lo stato di apprendimento"""
     wants = get_wantlist()
     cache = load_stats_cache()
     current_pos = load_last_index()
@@ -472,20 +466,21 @@ def show_progress():
     html = f"<h2>📊 Progresso Apprendimento</h2>"
     html += f"<p><strong>Apprese:</strong> {len(cache)}/{len(wants)}</p>"
     html += f"<p><strong>Posizione attuale:</strong> {current_pos}</p>"
+    html += f"<p><strong>Ordine:</strong> Dalla più RECENTE</p>"
     html += f"<h3>🎯 Release Mancanti ({len(missing)})</h3><ul>"
     for rid, title in missing:
         html += f"<li>{rid} - {title[:60]}... <a href='/debug?id={rid}'>🔍 DEBUG</a></li>"
     html += "</ul><a href='/'>↩️ Home</a>"
     return html, 200
 
-# === RESET (pulisce anche l'indice) ===
+# === RESET ===
 @app.route("/reset")
 def reset_cache():
     save_stats_cache({})
     if os.path.exists(INDEX_FILE):
         os.remove(INDEX_FILE)
     logger.warning("🔄 CACHE E INDICE RESETTATI!")
-    return "<h1>🔄 Cache e indice resettati!</h1><p>Ora ripartirà dalla posizione 0.</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🔄 Cache e indice resettati!</h1><p>Ora ripartirà dalla posizione 0 (release più recente).</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/reset", methods=['HEAD'])
 def reset_head():
@@ -519,10 +514,10 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - VERSIONE SEQUENZIALE</b>\n\n"
-        f"✅ Sistema con 30 release SEQUENZIALI ogni 5 minuti\n"
+        f"🧪 <b>Test Monitor - VERSIONE ORDINATA</b>\n\n"
+        f"✅ Sistema con 30 release SEQUENZIALI ORDINATE\n"
         f"• 📊 SOLO API stats\n"
-        f"• ✅ Copertura totale garantita\n"
+        f"• ✅ Ordine: dalla più RECENTE\n"
         f"• 🚫 NESSUN 429 garantito!\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
@@ -576,7 +571,7 @@ def main_loop_sequential():
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio SEQUENZIALE - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio ORDINATO - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
             monitor_stats_sequential()
@@ -599,23 +594,25 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE SEQUENZIALE")
+    logger.info("📊 DISCOGS MONITOR - VERSIONE ORDINATA DEFINITIVA")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 30")
-    logger.info(f"📌 Modalità: SEQUENZIALE (copertura totale)")
+    logger.info(f"📌 Modalità: SEQUENZIALE ORDINATA")
+    logger.info(f"📅 Ordine: Dalla più RECENTE alla più VECCHIA")
     logger.info(f"✅ Modalità: SOLO API stats")
     logger.info(f"🚫 429: NESSUN rate limit garantito!")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - VERSIONE SEQUENZIALE</b>\n\n"
-        f"✅ <b>CONFIGURAZIONE DEFINITIVA:</b>\n"
+        f"📊 <b>Discogs Monitor - VERSIONE ORDINATA DEFINITIVA</b>\n\n"
+        f"✅ <b>CONFIGURAZIONE FINALE:</b>\n"
         f"• 📌 30 release SEQUENZIALI per ciclo\n"
+        f"• 📅 Ordine: dalla più RECENTE\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
         f"• 📊 SOLO API stats\n"
-        f"• ✅ Copertura TOTALE della wantlist\n"
+        f"• ✅ Copertura TOTALE garantita\n"
         f"• ❌ MAI notifiche alla prima rilevazione\n"
         f"• 🚫 NESSUN 429 garantito!\n\n"
         f"👤 {USERNAME}\n"
