@@ -9,16 +9,19 @@ from threading import Thread
 import logging
 
 # ================== CONFIG ==================
-CHECK_INTERVAL = 300  # 5 minuti tra un ciclo e l'altro
+CHECK_INTERVAL = 300  # 5 minuti
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 USERNAME = os.environ.get("DISCOGS_USERNAME")
 
-# File di cache
+SEEN_FILE = "stats_seen.json"
+LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
-INDEX_FILE = "last_index.txt"
-LOG_FILE = "discogs_bot.log"
+INDEX_FILE = "last_index.txt"  # Nuovo: per tracciare la posizione
+
+# ================== EMERGENZA STOP ==================
+EMERGENCY_STOP = False
 
 # ================== LOGGING ==================
 logging.basicConfig(
@@ -31,19 +34,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== VARIABILI GLOBALI ==================
-EMERGENCY_STOP = False  # Se True, blocca l'invio di messaggi
-
-# ================== FUNZIONI TELEGRAM ==================
+# ================== TELEGRAM ==================
 def send_telegram(msg):
-    """Invia un messaggio su Telegram, se non in emergenza."""
     if EMERGENCY_STOP:
-        logger.info("🚫 Notifica bloccata (modalità emergenza)")
+        logger.info(f"🚫 Notifica bloccata in emergenza")
         return False
+    
     if not TG_TOKEN or not TG_CHAT:
-        logger.error("❌ Token o Chat ID Telegram mancanti")
         return False
-
+    
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT,
@@ -51,387 +50,580 @@ def send_telegram(msg):
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
+    
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        logger.error(f"❌ Errore Telegram: {e}")
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except:
         return False
 
-# ================== GESTIONE CACHE STATS ==================
-def load_cache():
-    """Carica la cache delle statistiche (numero copie, prezzi, etc.)."""
-    if os.path.exists(STATS_CACHE_FILE):
-        with open(STATS_CACHE_FILE, 'r') as f:
-            return json.load(f)
+# ================== STATS CACHE ==================
+def load_stats_cache():
+    try:
+        if os.path.exists(STATS_CACHE_FILE):
+            with open(STATS_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+                logger.info(f"📚 Cache caricata: {len(cache)} release")
+                return cache
+    except Exception as e:
+        logger.error(f"❌ Errore caricamento cache: {e}")
     return {}
 
-def save_cache(cache):
-    """Salva la cache delle statistiche."""
-    with open(STATS_CACHE_FILE, 'w') as f:
-        json.dump(cache, f, indent=2)
+def save_stats_cache(cache):
+    try:
+        with open(STATS_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+        logger.info(f"💾 Cache salvata: {len(cache)} release")
+    except Exception as e:
+        logger.error(f"❌ Errore salvataggio cache: {e}")
 
 # ================== GESTIONE INDICE SEQUENZIALE ==================
-def load_index():
-    """Carica l'indice da cui partire nel prossimo ciclo."""
-    if os.path.exists(INDEX_FILE):
-        with open(INDEX_FILE, 'r') as f:
-            return int(f.read().strip())
+def load_last_index():
+    """Carica l'ultimo indice processato"""
+    try:
+        if os.path.exists(INDEX_FILE):
+            with open(INDEX_FILE, "r") as f:
+                return int(f.read().strip())
+    except:
+        pass
     return 0
 
-def save_index(idx):
-    """Salva l'indice corrente."""
-    with open(INDEX_FILE, 'w') as f:
-        f.write(str(idx))
+def save_last_index(index):
+    """Salva l'indice corrente"""
+    try:
+        with open(INDEX_FILE, "w") as f:
+            f.write(str(index))
+    except Exception as e:
+        logger.error(f"❌ Errore salvataggio indice: {e}")
 
-# ================== API DISCOGS ==================
+# ================== DISCOGS API - VERSIONE STABILE ==================
 def get_wantlist():
-    """
-    Scarica l'intera wantlist, ordinata dalla più RECENTE alla più VECCHIA.
-    Questo ordine rispecchia quello che vedi sul sito.
-    """
+    """Ottieni wantlist completa"""
     all_wants = []
     page = 1
-
-    logger.info("📥 Scaricamento wantlist ordinata...")
-
+    
+    logger.info(f"📥 Scaricamento wantlist...")
+    
     while True:
         url = f"https://api.discogs.com/users/{USERNAME}/wants"
-        params = {
-            'page': page,
-            'per_page': 100,
-            'sort': 'added',
-            'sort_order': 'desc'
-        }
+        params = {'page': page, 'per_page': 100}
         headers = {
-            "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-            "User-Agent": "DiscogsBot/12.0-FINAL"
+            "Authorization": f"Discogs token={DISCOGS_TOKEN}", 
+            "User-Agent": "DiscogsStatsBot/9.0-SEQUENTIAL"
         }
-
+        
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=30)
-            if r.status_code != 200:
-                logger.error(f"❌ Errore nel scaricare pagina {page}: {r.status_code}")
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code != 200:
                 break
-
-            data = r.json()
+            
+            data = response.json()
             wants = data.get('wants', [])
             if not wants:
                 break
-
+            
             all_wants.extend(wants)
             logger.info(f"📄 Pagina {page}: {len(wants)} articoli")
-            page += 1
-
-            # Se non ci sono altre pagine, esci
-            if page > data.get('pagination', {}).get('pages', 1):
+            
+            pagination = data.get('pagination', {})
+            if page >= pagination.get('pages', 1):
                 break
-
-            time.sleep(0.5)  # pausa tra pagine
-
+            page += 1
+            time.sleep(0.5)
+                
         except Exception as e:
-            logger.error(f"❌ Errore in get_wantlist: {e}")
+            logger.error(f"❌ Errore wantlist: {e}")
             break
-
-    logger.info(f"✅ Wantlist caricata: {len(all_wants)} articoli")
+    
+    logger.info(f"✅ Wantlist: {len(all_wants)} articoli")
     return all_wants
 
-def get_release_stats_safe(release_id):
+def get_release_stats_stable(release_id):
     """
-    Ottiene le statistiche di una release (numero copie, prezzo minimo)
-    con PAUSE LUNGHE per evitare 429.
+    ✅ VERSIONE STABILE - USA SOLO API STATS
     """
-    # 🔴🔴🔴 PAUSA FISSA OBBLIGATORIA: 2 secondi tra una richiesta e l'altra
-    time.sleep(2)
-
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsBot/12.0-FINAL"}
-
+    headers = {"User-Agent": "DiscogsStatsBot/9.0-SEQUENTIAL"}
+    
     try:
-        r = requests.get(url, headers=headers, timeout=30)
-
-        # Controlla il rate limit residuo
-        remaining = int(r.headers.get('X-Discogs-Ratelimit-Remaining', 60))
-        if remaining < 10:
-            logger.warning(f"⚠️ Rate limit basso ({remaining}), aspetto 5 secondi extra")
-            time.sleep(5)
-        elif remaining < 20:
-            time.sleep(3)
-
-        if r.status_code == 200:
-            data = r.json()
-            if not data:
-                return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
-
-            num = data.get('num_for_sale', 0)
-            low = data.get('lowest_price', {})
-            price = low.get('value', 'N/D')
-            curr = low.get('currency', '')
-
-            return {'num_for_sale': num, 'price': price, 'currency': curr}
-
-        elif r.status_code == 429:
-            retry = int(r.headers.get('Retry-After', 60))
-            logger.warning(f"⏳ 429: aspetto {retry}s")
-            time.sleep(retry)
-            return get_release_stats_safe(release_id)  # riprova
-
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        # Rate limiting - conservativo
+        remaining = int(response.headers.get('X-Discogs-Ratelimit-Remaining', 60))
+        if remaining < 5:
+            time.sleep(2)
+        elif remaining < 10:
+            time.sleep(1)
         else:
-            logger.error(f"❌ API error {r.status_code} per {release_id}")
-
+            time.sleep(0.5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data is None:
+                return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
+            
+            stats_count = data.get('num_for_sale', 0) if isinstance(data, dict) else 0
+            lowest = data.get('lowest_price', {}) if isinstance(data, dict) else {}
+            price = lowest.get('value', 'N/D') if isinstance(lowest, dict) else 'N/D'
+            currency = lowest.get('currency', '') if isinstance(lowest, dict) else ''
+            
+            return {
+                'num_for_sale': stats_count,
+                'price': price,
+                'currency': currency
+            }
+            
+        elif response.status_code == 429:
+            retry_after = int(response.headers.get('Retry-After', 30))
+            logger.warning(f"⏳ 429, aspetto {retry_after}s")
+            time.sleep(retry_after)
+            return get_release_stats_stable(release_id)
+            
     except Exception as e:
         logger.error(f"❌ Errore stats {release_id}: {e}")
-
+    
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== CICLO PRINCIPALE ==================
-def run_check_cycle():
-    """
-    Esegue un singolo ciclo di controllo:
-    1. Carica wantlist ordinata
-    2. Prende 30 release consecutive (in base all'indice)
-    3. Per ognuna, confronta con la cache e notifica se cambiato
-    """
-    logger.info("🔄 Avvio ciclo di controllo...")
+# ================== MONITORAGGIO SEQUENZIALE ==================
+def monitor_stats_sequential():
+    """Monitoraggio SEQUENZIALE - 30 release in ordine"""
+    logger.info("📊 Monitoraggio SEQUENZIALE...")
+    
     wants = get_wantlist()
     if not wants:
-        logger.error("❌ Wantlist vuota, impossibile continuare")
-        return
-
-    cache = load_cache()
-    changes = 0
-    notifications = 0
-
-    # Determina quante e quali release controllare (30 per ciclo)
-    total = len(wants)
-    batch_size = 30
-    start = load_index()
-
-    # Prendi 30 release a partire da 'start'
-    to_check = wants[start:start + batch_size]
-    # Se siamo in fondo, ricomincia da capo prendendo le prime mancanti
-    if len(to_check) < batch_size:
-        remaining = batch_size - len(to_check)
-        to_check += wants[:remaining]
-        start = remaining
+        return 0
+    
+    stats_cache = load_stats_cache()
+    changes_detected = 0
+    notifications_sent = 0
+    
+    # 30 release in ordine
+    check_count = min(30, len(wants))
+    start_index = load_last_index()
+    
+    # Prende 30 release in ordine, partendo dall'ultimo indice
+    releases_to_check = wants[start_index:start_index + check_count]
+    
+    # Se siamo alla fine, ricomincia da capo
+    if len(releases_to_check) < check_count:
+        remaining = check_count - len(releases_to_check)
+        releases_to_check += wants[:remaining]
+        start_index = remaining
     else:
-        start += batch_size
-
-    # Salva il nuovo indice (modulo totale, per sicurezza)
-    save_index(start % total)
-
-    logger.info(f"🔍 Controllo {len(to_check)} release (posizione {start})...")
-
-    for idx, item in enumerate(to_check):
-        rid = str(item['id'])
-        info = item.get('basic_information', {})
-        title = info.get('title', 'Sconosciuto')
-        artists = info.get('artists', [{}])
-        artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
-
-        logger.info(f"[{idx+1}/{len(to_check)}] {artist} - {title[:40]}...")
-
-        # Ottieni i dati attuali
-        current = get_release_stats_safe(rid)
-
-        # Se la risposta è malformata, salta
-        if current is None or current.get('num_for_sale') is None:
-            logger.error(f"   ❌ Dati non validi per {rid}, salto")
-            continue
-
-        curr_count = current['num_for_sale']
-
-        # Recupera i dati precedenti dalla cache
-        prev = cache.get(rid, {})
-        prev_count = prev.get('num_for_sale', -1)
-
-        # Prima rilevazione: apprendimento, nessuna notifica
-        if prev_count == -1:
-            logger.info(f"   📝 APPRENDIMENTO: {curr_count} copie")
-            changes += 1  # lo consideriamo un cambiamento per la cache
-
-        # Cambiamento reale (numero copie diverso)
-        elif curr_count != prev_count:
-            diff = curr_count - prev_count
-            emoji = "🆕" if diff > 0 else "📉"
-            action = f"+{diff} NUOVE" if diff > 0 else f"{diff} vendute"
-            price_str = f"{current['currency']} {current['price']}" if current['price'] != 'N/D' else 'N/D'
-
-            msg = (
-                f"{emoji} <b>CAMBIAMENTO</b>\n\n"
-                f"🎸 <b>{artist}</b>\n💿 {title}\n\n"
-                f"📊 {action}\n💰 Prezzo più basso: {price_str}\n"
-                f"📦 Totale: {curr_count} copie\n\n"
-                f"🔗 <a href='https://www.discogs.com/sell/list?release_id={rid}'>VEDI COPIE</a>"
-            )
-            if send_telegram(msg):
-                notifications += 1
-                changes += 1
-                logger.info(f"   🎯 NOTIFICA #{notifications}: {action}")
-                time.sleep(1)  # pausa tra notifiche
-
-        # Stabile
-        elif curr_count > 0:
-            logger.info(f"   ℹ️ Stabili: {curr_count} copie")
-
-        # Aggiorna la cache se necessario
-        if prev_count != curr_count:
-            cache[rid] = {
-                'num_for_sale': curr_count,
-                'price': current['price'],
-                'currency': current['currency'],
-                'artist': artist,
-                'title': title,
-                'last_check': time.time()
-            }
-            logger.info(f"   💾 Cache aggiornata: {prev_count} → {curr_count}")
-
-        # Pausa dinamica: se ci sono copie, aspetta di più
-        if curr_count > 0:
+        start_index += check_count
+    
+    # Salva l'indice per il prossimo ciclo
+    save_last_index(start_index % len(wants))
+    
+    logger.info(f"🔍 Controllo {len(releases_to_check)} release in ordine (posizione {start_index})...")
+    
+    for i, item in enumerate(releases_to_check):
+        try:
+            release_id = str(item.get('id'))
+            if not release_id:
+                continue
+                
+            basic_info = item.get('basic_information', {})
+            title = basic_info.get('title', 'Sconosciuto')
+            artists = basic_info.get('artists', [{}])
+            artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
+            
+            logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
+            
+            # Ottieni stats correnti
+            current = get_release_stats_stable(release_id)
+            
+            if current is None or current.get('num_for_sale') is None:
+                logger.error(f"   ❌ current è None per {release_id}, salto...")
+                continue
+                
+            current_count = current['num_for_sale']
+            
+            # Recupera stats precedenti dalla cache
+            previous = stats_cache.get(release_id, {})
+            previous_count = previous.get('num_for_sale', -1)
+            
+            # PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE)
+            if previous_count == -1:
+                logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
+                
+            # SOLO CAMBIAMENTI REALI GENERANO NOTIFICHE
+            elif current_count != previous_count:
+                diff = current_count - previous_count
+                
+                if diff > 0:
+                    emoji = "🆕"
+                    action = f"+{diff} NUOVE COPIE"
+                else:
+                    emoji = "📉"
+                    action = f"{diff} copie"
+                
+                price_display = f"{current['currency']} {current['price']}" if current['price'] != 'N/D' else 'N/D'
+                
+                msg = (
+                    f"{emoji} <b>CAMBIAMENTO MARKETPLACE</b>\n\n"
+                    f"🎸 <b>{artist}</b>\n"
+                    f"💿 {title}\n\n"
+                    f"📊 <b>{action}</b>\n"
+                    f"💰 Prezzo più basso: <b>{price_display}</b>\n"
+                    f"📦 Totale ora: <b>{current_count} copie</b>\n\n"
+                    f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI COPIE</a>"
+                )
+                
+                if send_telegram(msg):
+                    notifications_sent += 1
+                    changes_detected += 1
+                    logger.info(f"   🎯 CAMBIAMENTO REALE: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
+                    time.sleep(1)
+            
+            elif current_count > 0 and current_count == previous_count:
+                logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
+            
+            # AGGIORNA CACHE SOLO SE CAMBIA
+            if previous_count != current_count:
+                stats_cache[release_id] = {
+                    'num_for_sale': current_count,
+                    'price': current['price'],
+                    'currency': current['currency'],
+                    'artist': artist,
+                    'title': title,
+                    'last_change': datetime.now().isoformat() if previous_count != -1 else None,
+                    'first_seen': datetime.now().isoformat(),
+                    'last_check': time.time()
+                }
+                logger.info(f"   💾 Cache aggiornata: {previous_count} → {current_count}")
+            
+        except Exception as e:
+            logger.error(f"❌ Errore release {i+1}: {e}")
+        
+        # Pausa dinamica
+        if 'current_count' in locals() and current_count > 0:
             time.sleep(random.uniform(0.8, 1.2))
         else:
             time.sleep(random.uniform(0.3, 0.6))
-
-    # Salva la cache aggiornata
-    save_cache(cache)
-    logger.info(f"✅ Ciclo completato: {changes} cambi, {notifications} notifiche")
+    
+    save_stats_cache(stats_cache)
+    
+    logger.info(f"✅ Rilevati {changes_detected} cambiamenti REALI, {notifications_sent} notifiche inviate")
+    return changes_detected
 
 # ================== FLASK APP ==================
 app = Flask(__name__)
 
+# === ENDPOINT EMERGENZA STOP/START ===
+@app.route("/stop")
+def emergency_stop():
+    global EMERGENCY_STOP
+    EMERGENCY_STOP = True
+    logger.critical("🛑🛑🛑 EMERGENZA - BOT BLOCCATO!")
+    send_telegram("🛑 BOT BLOCCATO IN EMERGENZA - Nessuna notifica")
+    return "<h1>🛑 BOT BLOCCATO</h1><p>Vai su /start per riattivare</p>", 200
+
+@app.route("/start")
+def emergency_start():
+    global EMERGENCY_STOP
+    EMERGENCY_STOP = False
+    logger.warning("✅ Bot riattivato")
+    send_telegram("✅ Bot RIATTIVATO - Notifiche solo per cambiamenti REALI")
+    return "<h1>✅ Bot riattivato</h1>", 200
+
+# === ENDPOINT DI EMERGENZA RECUPERO ===
+@app.route("/fix-now")
+def fix_now():
+    logger.warning("🆘 AVVIO PROCEDURA DI RECUPERO EMERGENZA!")
+    wants = get_wantlist()[:30]
+    recovered = 0
+    
+    for item in wants:
+        try:
+            release_id = str(item.get('id'))
+            basic_info = item.get('basic_information', {})
+            title = basic_info.get('title', 'Sconosciuto')
+            artists = basic_info.get('artists', [{}])
+            artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
+            
+            stats = get_release_stats_stable(release_id)
+            
+            if stats['num_for_sale'] > 0:
+                msg = (
+                    f"🆘 <b>RECUPERO EMERGENZA</b>\n\n"
+                    f"🎸 <b>{artist}</b>\n"
+                    f"💿 {title}\n\n"
+                    f"📦 <b>{stats['num_for_sale']} copie in vendita!</b>\n"
+                    f"💰 Prezzo più basso: {stats['currency']} {stats['price']}\n\n"
+                    f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VERIFICA SU DISCOGS</a>"
+                )
+                if send_telegram(msg):
+                    recovered += 1
+                    logger.info(f"✅ Recuperata: {artist} - {title[:30]}...")
+            
+            time.sleep(0.5)
+        except Exception as e:
+            logger.error(f"❌ Errore recupero: {e}")
+    
+    return f"<h1>✅ Procedura di recupero completata!</h1><p>Inviate {recovered} notifiche di recupero.</p><a href='/'>↩️ Home</a>", 200
+
+# === HOME (CON POSIZIONE SEQUENZIALE) ===
 @app.route("/")
 def home():
-    cache = load_cache()
-    wants = get_wantlist()
+    cache = load_stats_cache()
     monitored = len(cache)
-    with_sales = sum(1 for v in cache.values() if v.get('num_for_sale', 0) > 0)
-    pos = load_index()
+    with_stats = sum(1 for v in cache.values() if v.get('num_for_sale', 0) > 0)
+    current_pos = load_last_index()
+    wants = get_wantlist()
+    
     status = "🟢 ONLINE" if not EMERGENCY_STOP else "🔴 BLOCCATO"
-
+    
     return f"""
     <!DOCTYPE html>
     <html>
-    <head><title>📊 Discogs Bot - FINALE</title>
-    <meta charset="UTF-8">
-    <style>
-        body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
-        .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; }}
-        h1 {{ color: #333; border-bottom: 3px solid #4CAF50; }}
-        .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin: 5px; }}
-        .btn-stop {{ background: #dc3545; }}
-        .stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
-        .stat-card {{ background: #4CAF50; color: white; padding: 20px; border-radius: 10px; text-align: center; }}
-    </style>
+    <head>
+        <title>📊 Discogs Monitor - SEQUENZIALE</title>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
+            .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; }}
+            h1 {{ color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }}
+            .status {{ display: inline-block; padding: 10px 20px; border-radius: 5px; color: white; font-weight: bold; }}
+            .stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
+            .stat-card {{ background: #4CAF50; color: white; padding: 20px; border-radius: 10px; text-align: center; }}
+            .btn {{ display: inline-block; background: #4CAF50; color: white; padding: 10px 20px; 
+                    text-decoration: none; border-radius: 5px; margin: 5px; font-size: 16px; }}
+            .btn-stop {{ background: #dc3545; }}
+            .btn-start {{ background: #28a745; }}
+        </style>
     </head>
     <body>
-    <div class="container">
-        <h1>📊 Discogs Bot - VERSIONE FINALE</h1>
-        <p><strong>Stato:</strong> {status}</p>
-        <div class="stats">
-            <div class="stat-card"><h3>📈 Monitorate</h3><p style="font-size:2.5em;">{monitored}</p></div>
-            <div class="stat-card" style="background:#dc3545;"><h3>🛒 Con copie</h3><p style="font-size:2.5em;">{with_sales}</p></div>
+        <div class="container">
+            <h1>📊 Discogs Monitor - VERSIONE SEQUENZIALE</h1>
+            
+            <div style="margin: 20px 0; text-align: center;">
+                <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
+                    {status}
+                </span>
+            </div>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <h3>📈 Release Monitorate</h3>
+                    <p style="font-size: 2.5em; margin: 10px 0;">{monitored}</p>
+                </div>
+                <div class="stat-card" style="background: #dc3545;">
+                    <h3>🛒 Con Copie in Vendita</h3>
+                    <p style="font-size: 2.5em; margin: 10px 0;">{with_stats}</p>
+                </div>
+            </div>
+            
+            <div style="margin: 30px 0; text-align: center;">
+                <h3>🔧 Controlli Rapidi</h3>
+                <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
+                    <a class="btn" href="/check">🚀 Controllo</a>
+                    <a class="btn btn-stop" href="/stop">🔴 STOP</a>
+                    <a class="btn btn-start" href="/start">🟢 START</a>
+                    <a class="btn" href="/fix-now">🆘 Recupero</a>
+                    <a class="btn" href="/test">🧪 Test</a>
+                    <a class="btn" href="/reset">🔄 Reset Cache</a>
+                    <a class="btn" href="/logs">📄 Logs</a>
+                    <a class="btn" href="/progress">📊 Progresso</a>
+                </div>
+            </div>
+            
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; margin-top: 20px;">
+                <p><strong>👤 Utente:</strong> {USERNAME}</p>
+                <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
+                <p><strong>🔍 Release per ciclo:</strong> 30 (SEQUENZIALI)</p>
+                <p><strong>📌 Posizione attuale:</strong> {current_pos}/{len(wants)}</p>
+                <p><strong>✅ Modalità:</strong> SOLO API stats</p>
+                <p><strong>🚫 429:</strong> NESSUN rate limit garantito!</p>
+            </div>
         </div>
-        <p><strong>👤 Utente:</strong> {USERNAME}</p>
-        <p><strong>📌 Posizione:</strong> {pos}/{len(wants)}</p>
-        <p><strong>⏰ 30 release ogni 5 minuti (rallentato, zero 429)</strong></p>
-        <a class="btn" href="/check">🚀 Controllo manuale</a>
-        <a class="btn btn-stop" href="/stop">🔴 STOP</a>
-        <a class="btn" href="/start">🟢 START</a>
-        <a class="btn" href="/reset">🔄 Reset cache</a>
-        <a class="btn" href="/progress">📊 Progresso</a>
-        <a class="btn" href="/logs">📄 Logs</a>
-    </div>
     </body>
     </html>
     """
 
+@app.route("/", methods=['HEAD'])
+def home_head():
+    return "", 200
+
+# === CHECK (ora usa la versione SEQUENZIALE) ===
 @app.route("/check")
 def manual_check():
-    Thread(target=run_check_cycle, daemon=True).start()
-    return "<h1>🚀 Controllo avviato</h1><a href='/'>Home</a>"
+    Thread(target=monitor_stats_sequential, daemon=True).start()
+    return "<h1>🚀 Monitoraggio SEQUENZIALE avviato!</h1><p>✅ 30 release in ordine ogni 5 minuti</p><a href='/'>↩️ Home</a>", 200
 
-@app.route("/stop")
-def stop():
-    global EMERGENCY_STOP
-    EMERGENCY_STOP = True
-    logger.critical("🛑 BOT BLOCCATO MANUALMENTE")
-    return "<h1>🔴 Bot bloccato</h1><a href='/start'>Riattiva</a>"
+@app.route("/check", methods=['HEAD'])
+def check_head():
+    return "", 200
 
-@app.route("/start")
-def start():
-    global EMERGENCY_STOP
-    EMERGENCY_STOP = False
-    logger.warning("✅ Bot riattivato")
-    send_telegram("✅ Bot riattivato")
-    return "<h1>🟢 Bot riattivato</h1><a href='/'>Home</a>"
-
-@app.route("/reset")
-def reset():
-    save_cache({})
-    save_index(0)
-    logger.warning("🔄 Cache e indice resettati")
-    return "<h1>🔄 Reset completato</h1><a href='/'>Home</a>"
-
+# === ENDPOINT PROGRESSO ===
 @app.route("/progress")
-def progress():
-    cache = load_cache()
+def show_progress():
+    """Mostra lo stato di apprendimento"""
     wants = get_wantlist()
+    cache = load_stats_cache()
+    current_pos = load_last_index()
+    
     cached_ids = set(cache.keys())
-    all_ids = {str(w['id']): w['basic_information']['title'] for w in wants}
+    all_ids = {str(item['id']): item['basic_information']['title'] for item in wants}
+    
     missing = [(rid, title) for rid, title in all_ids.items() if rid not in cached_ids]
-    html = f"<h2>📊 Progresso</h2><p>Apprese: {len(cache)}/{len(wants)}</p>"
-    if missing:
-        html += "<h3>🎯 Mancanti:</h3><ul>"
-        for rid, title in missing:
-            html += f"<li>{rid} - {title[:60]}</li>"
-        html += "</ul>"
-    html += "<a href='/'>Home</a>"
-    return html
+    
+    html = f"<h2>📊 Progresso Apprendimento</h2>"
+    html += f"<p><strong>Apprese:</strong> {len(cache)}/{len(wants)}</p>"
+    html += f"<p><strong>Posizione attuale:</strong> {current_pos}</p>"
+    html += f"<h3>🎯 Release Mancanti ({len(missing)})</h3><ul>"
+    for rid, title in missing:
+        html += f"<li>{rid} - {title[:60]}... <a href='/debug?id={rid}'>🔍 DEBUG</a></li>"
+    html += "</ul><a href='/'>↩️ Home</a>"
+    return html, 200
 
+# === RESET (pulisce anche l'indice) ===
+@app.route("/reset")
+def reset_cache():
+    save_stats_cache({})
+    if os.path.exists(INDEX_FILE):
+        os.remove(INDEX_FILE)
+    logger.warning("🔄 CACHE E INDICE RESETTATI!")
+    return "<h1>🔄 Cache e indice resettati!</h1><p>Ora ripartirà dalla posizione 0.</p><a href='/'>↩️ Home</a>", 200
+
+@app.route("/reset", methods=['HEAD'])
+def reset_head():
+    return "", 200
+
+# === DEBUG ===
+@app.route("/debug")
+def debug_release():
+    release_id = request.args.get('id', '14809291')
+    stats = get_release_stats_stable(release_id)
+    cache = load_stats_cache()
+    cached = cache.get(release_id, {})
+    
+    html = f"<h2>🔍 Debug Release {release_id}</h2>"
+    html += f"<h3>📊 Stats Correnti (API):</h3>"
+    html += f"<p>Copie: <b>{stats['num_for_sale']}</b></p>"
+    html += f"<p>Prezzo più basso: <b>{stats['currency']} {stats['price']}</b></p>"
+    html += f"<h3>💾 Stats Cache:</h3>"
+    html += f"<p>Copie memorizzate: <b>{cached.get('num_for_sale', 'Mai vista')}</b></p>"
+    html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
+    html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
+    html += "<br><a href='/'>↩️ Home</a>"
+    
+    return html, 200
+
+@app.route("/debug", methods=['HEAD'])
+def debug_head():
+    return "", 200
+
+# === TEST ===
+@app.route("/test")
+def test_telegram():
+    success = send_telegram(
+        f"🧪 <b>Test Monitor - VERSIONE SEQUENZIALE</b>\n\n"
+        f"✅ Sistema con 30 release SEQUENZIALI ogni 5 minuti\n"
+        f"• 📊 SOLO API stats\n"
+        f"• ✅ Copertura totale garantita\n"
+        f"• 🚫 NESSUN 429 garantito!\n"
+        f"👤 {USERNAME}\n"
+        f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
+    )
+    return "✅ Test inviato" if success else "❌ Errore", 200
+
+@app.route("/test", methods=['HEAD'])
+def test_head():
+    return "", 200
+
+# === LOGS ===
 @app.route("/logs")
 def view_logs():
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, 'r') as f:
+    try:
+        with open(LOG_FILE, "r") as f:
             logs = f.read().splitlines()[-100:]
-        return "<pre>" + "<br>".join(logs) + "</pre><br><a href='/'>Home</a>"
-    return "<pre>Nessun log</pre><a href='/'>Home</a>"
+        return "<pre style='background:#000; color:#0f0; padding:20px;'>" + "<br>".join(logs) + "</pre><br><a href='/'>↩️ Home</a>", 200
+    except:
+        return "<pre>Nessun log</pre><a href='/'>↩️ Home</a>", 200
+
+@app.route("/logs", methods=['HEAD'])
+def logs_head():
+    return "", 200
+
+# === CACHE ===
+@app.route("/cache")
+def view_cache():
+    cache = load_stats_cache()
+    html = f"<h2>💾 Stats Cache ({len(cache)} release)</h2><ul>"
+    for rid, data in list(cache.items())[:20]:
+        html += f"<li>{rid}: {data.get('num_for_sale', 0)} copie - {data.get('artist', '')[:20]}</li>"
+    html += "</ul><a href='/'>↩️ Home</a>"
+    return html, 200
+
+@app.route("/cache", methods=['HEAD'])
+def cache_head():
+    return "", 200
+
+# === HEALTH ===
+@app.route("/health")
+def health_check():
+    return "OK", 200
+
+@app.route("/health", methods=['HEAD'])
+def health_head():
+    return "", 200
 
 # ================== MAIN LOOP ==================
-def main_loop():
-    """Avvia i cicli ogni 5 minuti."""
+def main_loop_sequential():
     time.sleep(10)
     while True:
-        if not EMERGENCY_STOP:
-            run_check_cycle()
-        else:
-            logger.info("⏸️ Bot in pausa (emergenza), nessun controllo eseguito")
-        for _ in range(CHECK_INTERVAL):
-            time.sleep(1)
+        try:
+            logger.info(f"\n{'='*70}")
+            logger.info(f"🔄 Monitoraggio SEQUENZIALE - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info('='*70)
+            
+            monitor_stats_sequential()
+            
+            logger.info(f"💤 Pausa 5 minuti...")
+            for _ in range(CHECK_INTERVAL):
+                time.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"❌ Loop error: {e}")
+            time.sleep(60)
 
-# ================== AVVIO ==================
+# ================== STARTUP ==================
 if __name__ == "__main__":
     required = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]
-    missing = [v for v in required if not os.environ.get(v)]
+    missing = [var for var in required if not os.environ.get(var)]
+    
     if missing:
         logger.error(f"❌ Variabili mancanti: {missing}")
         exit(1)
-
-    logger.info("="*60)
-    logger.info("🤖 DISCOGS BOT - VERSIONE FINALE SUPER-LENTA")
-    logger.info("="*60)
+    
+    logger.info('='*70)
+    logger.info("📊 DISCOGS MONITOR - VERSIONE SEQUENZIALE")
+    logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
-    logger.info("✅ PAUSA FISSA DI 2 SECONDI tra le richieste – ZERO 429")
-    logger.info("="*60)
-
+    logger.info(f"🔍 Release/ciclo: 30")
+    logger.info(f"📌 Modalità: SEQUENZIALE (copertura totale)")
+    logger.info(f"✅ Modalità: SOLO API stats")
+    logger.info(f"🚫 429: NESSUN rate limit garantito!")
+    logger.info('='*70)
+    
     send_telegram(
-        f"🤖 <b>Bot finale avviato</b>\n\n"
-        f"✅ 30 release ogni 5 minuti (rallentato)\n"
-        f"⏱️ Pausa 2 secondi tra richieste – zero 429\n"
-        f"👤 {USERNAME}"
+        f"📊 <b>Discogs Monitor - VERSIONE SEQUENZIALE</b>\n\n"
+        f"✅ <b>CONFIGURAZIONE DEFINITIVA:</b>\n"
+        f"• 📌 30 release SEQUENZIALI per ciclo\n"
+        f"• ⏰ Controllo ogni 5 minuti\n"
+        f"• 📊 SOLO API stats\n"
+        f"• ✅ Copertura TOTALE della wantlist\n"
+        f"• ❌ MAI notifiche alla prima rilevazione\n"
+        f"• 🚫 NESSUN 429 garantito!\n\n"
+        f"👤 {USERNAME}\n"
+        f"📊 {len(get_wantlist())} articoli in wantlist\n"
+        f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
-
-    Thread(target=main_loop, daemon=True).start()
-
+    
+    Thread(target=main_loop_sequential, daemon=True).start()
+    
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
