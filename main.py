@@ -76,7 +76,11 @@ def save_stats_cache(cache):
     except Exception as e:
         logger.error(f"❌ Errore salvataggio cache: {e}")
 
-# ================== DISCOGS API - VERSIONE STABILE (SOLO STATS) ==================
+# ================== DISCOGS API CON RATE LIMITING DINAMICO ==================
+
+# 🔴 VARIABILE GLOBALE PER TRACCIARE LE RICHIESTE
+request_timestamps = []
+
 def get_wantlist():
     """Ottieni wantlist completa"""
     all_wants = []
@@ -89,7 +93,7 @@ def get_wantlist():
         params = {'page': page, 'per_page': 100}
         headers = {
             "Authorization": f"Discogs token={DISCOGS_TOKEN}", 
-            "User-Agent": "DiscogsStatsBot/8.0-STABLE"
+            "User-Agent": "DiscogsStatsBot/9.0-DYNAMIC"
         }
         
         try:
@@ -121,24 +125,45 @@ def get_wantlist():
 
 def get_release_stats_stable(release_id):
     """
-    ✅ VERSIONE STABILE - USA SOLO API STATS
-    ✅ NESSUNA richiesta HTML, NESSUNA cache HTML
-    ✅ 100% affidabile, zero blocchi
+    ✅ VERSIONE CON RATE LIMITING DINAMICO
     """
+    global request_timestamps
+    
+    # 1. Pulisci i timestamp vecchi (più di 60 secondi)
+    now = time.time()
+    request_timestamps = [ts for ts in request_timestamps if now - ts < 60]
+    
+    # 2. Se abbiamo già fatto più di 50 richieste nell'ultimo minuto, aspetta
+    if len(request_timestamps) >= 50:
+        oldest = min(request_timestamps)
+        wait_time = 60 - (now - oldest)
+        if wait_time > 0:
+            logger.warning(f"⏳ Rallento per {wait_time:.1f}s (già fatte {len(request_timestamps)} richieste)")
+            time.sleep(wait_time)
+    
+    # 3. Registra questa richiesta
+    request_timestamps.append(now)
+    
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsStatsBot/8.0-STABLE"}
+    headers = {"User-Agent": "DiscogsStatsBot/9.0-DYNAMIC"}
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
         
-        # Rate limiting - conservativo
+        # 4. Leggi il rate limit dalla risposta
         remaining = int(response.headers.get('X-Discogs-Ratelimit-Remaining', 60))
-        if remaining < 5:
+        used = int(response.headers.get('X-Discogs-Ratelimit-Used', 0))
+        logger.info(f"   📊 Rate limit: {remaining} rimaste, {used} usate")
+        
+        # 5. Se siamo sotto 10, rallenta per il prossimo ciclo
+        if remaining < 10:
+            sleep_time = 5
+            logger.warning(f"⚠️ Rate limit basso ({remaining}), aspetto {sleep_time}s extra")
+            time.sleep(sleep_time)
+        elif remaining < 20:
             time.sleep(2)
-        elif remaining < 10:
-            time.sleep(1)
         else:
-            time.sleep(0.5)
+            time.sleep(1)
         
         if response.status_code == 200:
             data = response.json()
@@ -157,7 +182,7 @@ def get_release_stats_stable(release_id):
             }
             
         elif response.status_code == 429:
-            retry_after = int(response.headers.get('Retry-After', 30))
+            retry_after = int(response.headers.get('Retry-After', 60))
             logger.warning(f"⏳ 429, aspetto {retry_after}s")
             time.sleep(retry_after)
             return get_release_stats_stable(release_id)
@@ -299,7 +324,7 @@ def emergency_start():
     send_telegram("✅ Bot RIATTIVATO - Notifiche solo per cambiamenti REALI")
     return "<h1>✅ Bot riattivato</h1>", 200
 
-# === ENDPOINT DI EMERGENZA RECUPERO (MODIFICATO - SOLO API) ===
+# === ENDPOINT DI EMERGENZA RECUPERO ===
 @app.route("/fix-now")
 def fix_now():
     """RECUPERO - USA SOLO API STATS"""
@@ -315,7 +340,6 @@ def fix_now():
             artists = basic_info.get('artists', [{}])
             artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
             
-            # USA SOLO API STATS - niente HTML
             stats = get_release_stats_stable(release_id)
             
             if stats['num_for_sale'] > 0:
@@ -350,7 +374,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - STABILE</title>
+        <title>📊 Discogs Monitor - RATE LIMITING DINAMICO</title>
         <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
@@ -367,7 +391,7 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - VERSIONE STABILE</h1>
+            <h1>📊 Discogs Monitor - RATE LIMITING DINAMICO</h1>
             
             <div style="margin: 20px 0; text-align: center;">
                 <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
@@ -403,10 +427,10 @@ def home():
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
                 <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
                 <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>
-                <p><strong>✅ Modalità:</strong> SOLO API stats (100% stabile)</p>
+                <p><strong>⚡ Rate Limiting:</strong> DINAMICO (si adatta al carico)</p>
+                <p><strong>✅ Modalità:</strong> SOLO API stats</p>
                 <p><strong>✅ Regola:</strong> Notifiche SOLO per cambiamenti REALI</p>
-                <p><strong>🚫 429:</strong> NESSUN rate limit garantito!</p>
-                <p><strong>⚠️ Nota:</strong> Se API stats=0, non ci sono copie (anche se la pagina dice il contrario)</p>
+                <p><strong>🚫 429:</strong> RIDOTTI AL MINIMO!</p>
             </div>
         </div>
     </body>
@@ -421,7 +445,7 @@ def home_head():
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_stable, daemon=True).start()
-    return "<h1>🚀 Monitoraggio STABILE avviato!</h1><p>✅ 30 release CASUALI ogni 5 minuti - SOLO API stats</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Rate limiting DINAMICO attivo</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -438,7 +462,7 @@ def reset_cache():
 def reset_head():
     return "", 200
 
-# === DEBUG (MODIFICATO - SOLO API) ===
+# === DEBUG ===
 @app.route("/debug")
 def debug_release():
     release_id = request.args.get('id', '14809291')
@@ -454,7 +478,7 @@ def debug_release():
     html += f"<p>Copie memorizzate: <b>{cached.get('num_for_sale', 'Mai vista')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
     html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
-    html += f"<p><i>⚠️ Questo bot usa SOLO API stats. Non verifica la pagina HTML.</i></p>"
+    html += f"<p><i>⚠️ Rate limiting DINAMICO attivo</i></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -467,11 +491,11 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - VERSIONE STABILE</b>\n\n"
-        f"✅ Sistema con 30 release/ciclo ogni 5 minuti\n"
-        f"• 📊 SOLO API stats (nessuna richiesta HTML)\n"
+        f"🧪 <b>Test Monitor - RATE LIMITING DINAMICO</b>\n\n"
+        f"✅ Sistema con rate limiting DINAMICO\n"
+        f"• 📊 Si adatta automaticamente al carico\n"
         f"• ✅ Solo CAMBIAMENTI REALI\n"
-        f"• 🚫 NESSUN 429 garantito!\n"
+        f"• 🚫 429 RIDOTTI AL MINIMO!\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
@@ -524,7 +548,7 @@ def main_loop_stable():
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio STABILE - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio DINAMICO - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
             monitor_stats_stable()
@@ -547,25 +571,26 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE STABILE (SOLO API STATS)")
+    logger.info("📊 DISCOGS MONITOR - RATE LIMITING DINAMICO")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 30")
     logger.info(f"🎲 Selezione: TUTTE CASUALI")
-    logger.info(f"✅ Modalità: SOLO API stats - NESSUNA richiesta HTML")
+    logger.info(f"⚡ Rate Limiting: DINAMICO (si adatta al carico)")
+    logger.info(f"✅ Modalità: SOLO API stats")
     logger.info(f"✅ REGOLA: MAI notifiche prima rilevazione")
-    logger.info(f"🚫 429: NESSUN rate limit garantito!")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - VERSIONE STABILE</b>\n\n"
-        f"✅ <b>CONFIGURAZIONE DEFINITIVA:</b>\n"
+        f"📊 <b>Discogs Monitor - RATE LIMITING DINAMICO</b>\n\n"
+        f"✅ <b>CONFIGURAZIONE AVANZATA:</b>\n"
         f"• 🎲 30 release CASUALI per ciclo\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
-        f"• 📊 SOLO API stats (zero richieste HTML)\n"
+        f"• ⚡ Rate limiting DINAMICO (si adatta al carico)\n"
+        f"• 📊 SOLO API stats\n"
         f"• ❌ MAI notifiche alla prima rilevazione\n"
-        f"• 🚫 NESSUN 429 garantito!\n\n"
+        f"• 🚫 429 RIDOTTI AL MINIMO!\n\n"
         f"👤 {USERNAME}\n"
         f"📊 {len(get_wantlist())} articoli in wantlist\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
