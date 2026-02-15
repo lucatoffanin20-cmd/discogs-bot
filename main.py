@@ -76,9 +76,7 @@ def save_stats_cache(cache):
     except Exception as e:
         logger.error(f"❌ Errore salvataggio cache: {e}")
 
-# ================== DISCOGS API CON RATE LIMITING DINAMICO ==================
-
-# 🔴 VARIABILE GLOBALE PER TRACCIARE LE RICHIESTE
+# ================== TRACCIAMENTO RICHIESTE PER RATE LIMIT ==================
 request_timestamps = []
 
 def get_wantlist():
@@ -93,7 +91,7 @@ def get_wantlist():
         params = {'page': page, 'per_page': 100}
         headers = {
             "Authorization": f"Discogs token={DISCOGS_TOKEN}", 
-            "User-Agent": "DiscogsStatsBot/9.0-DYNAMIC"
+            "User-Agent": "DiscogsStatsBot/10.0-FINAL"
         }
         
         try:
@@ -145,7 +143,7 @@ def get_release_stats_stable(release_id):
     request_timestamps.append(now)
     
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsStatsBot/9.0-DYNAMIC"}
+    headers = {"User-Agent": "DiscogsStatsBot/10.0-FINAL"}
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
@@ -192,10 +190,10 @@ def get_release_stats_stable(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO - 30 RELEASE CASUALI ==================
+# ================== MONITORAGGIO - NOTIFICHE SOLO PER NUOVI INSERIMENTI ==================
 def monitor_stats_stable():
-    """Monitoraggio STABILE - 30 release CASUALI, SOLO API stats"""
-    logger.info("📊 Monitoraggio STABILE (solo API stats)...")
+    """Monitoraggio - NOTIFICHE SOLO PER NUOVI INSERIMENTI"""
+    logger.info("📊 Monitoraggio (solo NUOVI inserimenti)...")
     
     wants = get_wantlist()
     if not wants:
@@ -228,7 +226,7 @@ def monitor_stats_stable():
             
             logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
             
-            # Usa la versione STABILE (solo API)
+            # Ottieni stats correnti
             current = get_release_stats_stable(release_id)
             
             if current is None or current.get('num_for_sale') is None:
@@ -236,29 +234,27 @@ def monitor_stats_stable():
                 continue
                 
             current_count = current['num_for_sale']
+            current_price = current['price']
+            current_currency = current['currency']
             
             previous = stats_cache.get(release_id, {})
             previous_count = previous.get('num_for_sale', -1)
+            previous_price = previous.get('price', 'N/D')
             
             # PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE)
             if previous_count == -1:
                 logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
                 
-            # SOLO CAMBIAMENTI REALI GENERANO NOTIFICHE
-            elif current_count != previous_count:
+            # 🔴 SOLO AUMENTI DI COPIE GENERANO NOTIFICHE (NUOVI INSERIMENTI)
+            elif current_count > previous_count:
                 diff = current_count - previous_count
+                emoji = "🆕"
+                action = f"+{diff} NUOVE COPIE"
                 
-                if diff > 0:
-                    emoji = "🆕"
-                    action = f"+{diff} NUOVE COPIE"
-                else:
-                    emoji = "📉"
-                    action = f"{diff} copie"
-                
-                price_display = f"{current['currency']} {current['price']}" if current['price'] != 'N/D' else 'N/D'
+                price_display = f"{current_currency} {current_price}" if current_price != 'N/D' else 'N/D'
                 
                 msg = (
-                    f"{emoji} <b>CAMBIAMENTO MARKETPLACE</b>\n\n"
+                    f"{emoji} <b>NUOVO ANNUNCIO RILEVATO!</b>\n\n"
                     f"🎸 <b>{artist}</b>\n"
                     f"💿 {title}\n\n"
                     f"📊 <b>{action}</b>\n"
@@ -270,30 +266,35 @@ def monitor_stats_stable():
                 if send_telegram(msg):
                     notifications_sent += 1
                     changes_detected += 1
-                    logger.info(f"   🎯 CAMBIAMENTO REALE: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
+                    logger.info(f"   🎯 NUOVO ANNUNCIO: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
                     time.sleep(1)
             
-            elif current_count > 0 and current_count == previous_count:
+            # 🔴 NESSUNA NOTIFICA PER DIMINUZIONI O VARIAZIONI PREZZO
+            elif current_count < previous_count:
+                logger.info(f"   📉 Diminuzione copie: {previous_count} → {current_count} (nessuna notifica)")
+            elif current_count == previous_count and current_price != previous_price:
+                logger.info(f"   💰 Variazione prezzo: {previous_price} → {current_price} (nessuna notifica)")
+            elif current_count > 0:
                 logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
             
-            # AGGIORNA CACHE SOLO SE CAMBIA
-            if previous_count != current_count:
+            # AGGIORNA CACHE (SEMPRE, indipendentemente dalle notifiche)
+            if previous_count != current_count or previous_price != current_price:
                 stats_cache[release_id] = {
                     'num_for_sale': current_count,
-                    'price': current['price'],
-                    'currency': current['currency'],
+                    'price': current_price,
+                    'currency': current_currency,
                     'artist': artist,
                     'title': title,
                     'last_change': datetime.now().isoformat() if previous_count != -1 else None,
                     'first_seen': datetime.now().isoformat(),
                     'last_check': time.time()
                 }
-                logger.info(f"   💾 Cache aggiornata: {previous_count} → {current_count}")
+                logger.info(f"   💾 Cache aggiornata: {previous_count} copie, {previous_price} → {current_count} copie, {current_price}")
             
         except Exception as e:
             logger.error(f"❌ Errore release {i+1}: {e}")
         
-        # Pausa dinamica
+        # Pausa dinamica (invariata)
         if 'current_count' in locals() and current_count > 0:
             time.sleep(random.uniform(0.8, 1.2))
         else:
@@ -301,10 +302,10 @@ def monitor_stats_stable():
     
     save_stats_cache(stats_cache)
     
-    logger.info(f"✅ Rilevati {changes_detected} cambiamenti REALI, {notifications_sent} notifiche inviate")
+    logger.info(f"✅ Rilevati {changes_detected} NUOVI INSERIMENTI, {notifications_sent} notifiche inviate")
     return changes_detected
 
-# ================== FLASK APP ==================
+# ================== FLASK APP (IDENTICA) ==================
 app = Flask(__name__)
 
 # === ENDPOINT EMERGENZA STOP/START ===
@@ -321,13 +322,12 @@ def emergency_start():
     global EMERGENCY_STOP
     EMERGENCY_STOP = False
     logger.warning("✅ Bot riattivato")
-    send_telegram("✅ Bot RIATTIVATO - Notifiche solo per cambiamenti REALI")
+    send_telegram("✅ Bot RIATTIVATO - Notifiche solo per NUOVI INSERIMENTI")
     return "<h1>✅ Bot riattivato</h1>", 200
 
 # === ENDPOINT DI EMERGENZA RECUPERO ===
 @app.route("/fix-now")
 def fix_now():
-    """RECUPERO - USA SOLO API STATS"""
     logger.warning("🆘 AVVIO PROCEDURA DI RECUPERO EMERGENZA!")
     wants = get_wantlist()[:30]
     recovered = 0
@@ -374,7 +374,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - RATE LIMITING DINAMICO</title>
+        <title>📊 Discogs Monitor - SOLO NUOVI INSERIMENTI</title>
         <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
@@ -391,7 +391,7 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - RATE LIMITING DINAMICO</h1>
+            <h1>📊 Discogs Monitor - SOLO NUOVI INSERIMENTI</h1>
             
             <div style="margin: 20px 0; text-align: center;">
                 <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
@@ -427,10 +427,9 @@ def home():
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
                 <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
                 <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>
-                <p><strong>⚡ Rate Limiting:</strong> DINAMICO (si adatta al carico)</p>
-                <p><strong>✅ Modalità:</strong> SOLO API stats</p>
-                <p><strong>✅ Regola:</strong> Notifiche SOLO per cambiamenti REALI</p>
-                <p><strong>🚫 429:</strong> RIDOTTI AL MINIMO!</p>
+                <p><strong>⚡ Rate Limiting:</strong> DINAMICO</p>
+                <p><strong>✅ Notifiche:</strong> SOLO per NUOVI INSERIMENTI</p>
+                <p><strong>🚫 Nessuna notifica per:</strong> vendite, rimozioni, variazioni prezzo</p>
             </div>
         </div>
     </body>
@@ -445,7 +444,7 @@ def home_head():
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_stable, daemon=True).start()
-    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Rate limiting DINAMICO attivo</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche solo per NUOVI INSERIMENTI</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -476,9 +475,10 @@ def debug_release():
     html += f"<p>Prezzo più basso: <b>{stats['currency']} {stats['price']}</b></p>"
     html += f"<h3>💾 Stats Cache:</h3>"
     html += f"<p>Copie memorizzate: <b>{cached.get('num_for_sale', 'Mai vista')}</b></p>"
+    html += f"<p>Prezzo memorizzato: <b>{cached.get('currency', '')} {cached.get('price', 'N/D')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
     html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
-    html += f"<p><i>⚠️ Rate limiting DINAMICO attivo</i></p>"
+    html += f"<p><i>⚡ Notifiche solo per AUMENTO copie</i></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -491,11 +491,11 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - RATE LIMITING DINAMICO</b>\n\n"
-        f"✅ Sistema con rate limiting DINAMICO\n"
-        f"• 📊 Si adatta automaticamente al carico\n"
-        f"• ✅ Solo CAMBIAMENTI REALI\n"
-        f"• 🚫 429 RIDOTTI AL MINIMO!\n"
+        f"🧪 <b>Test Monitor - SOLO NUOVI INSERIMENTI</b>\n\n"
+        f"✅ Sistema attivo\n"
+        f"• 📊 Rate limiting DINAMICO\n"
+        f"• ✅ Notifiche solo per AUMENTO copie\n"
+        f"• 🚫 Nessuna notifica per vendite o variazioni prezzo\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
@@ -548,7 +548,7 @@ def main_loop_stable():
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio DINAMICO - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
             monitor_stats_stable()
@@ -571,26 +571,25 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - RATE LIMITING DINAMICO")
+    logger.info("📊 DISCOGS MONITOR - NOTIFICHE SOLO NUOVI INSERIMENTI")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 30")
-    logger.info(f"🎲 Selezione: TUTTE CASUALI")
-    logger.info(f"⚡ Rate Limiting: DINAMICO (si adatta al carico)")
-    logger.info(f"✅ Modalità: SOLO API stats")
-    logger.info(f"✅ REGOLA: MAI notifiche prima rilevazione")
+    logger.info(f"🎲 Selezione: CASUALE")
+    logger.info(f"⚡ Rate Limiting: DINAMICO")
+    logger.info(f"✅ Notifiche: SOLO per AUMENTO copie")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - RATE LIMITING DINAMICO</b>\n\n"
-        f"✅ <b>CONFIGURAZIONE AVANZATA:</b>\n"
+        f"📊 <b>Discogs Monitor - NOTIFICHE SOLO NUOVI INSERIMENTI</b>\n\n"
+        f"✅ <b>CONFIGURAZIONE FINALE:</b>\n"
         f"• 🎲 30 release CASUALI per ciclo\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
-        f"• ⚡ Rate limiting DINAMICO (si adatta al carico)\n"
-        f"• 📊 SOLO API stats\n"
+        f"• ⚡ Rate limiting DINAMICO\n"
+        f"• ✅ Notifiche SOLO per NUOVI INSERIMENTI\n"
         f"• ❌ MAI notifiche alla prima rilevazione\n"
-        f"• 🚫 429 RIDOTTI AL MINIMO!\n\n"
+        f"• 🚫 NESSUNA notifica per vendite o variazioni prezzo\n\n"
         f"👤 {USERNAME}\n"
         f"📊 {len(get_wantlist())} articoli in wantlist\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
