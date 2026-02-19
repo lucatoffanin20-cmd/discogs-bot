@@ -121,18 +121,22 @@ def get_wantlist():
     logger.info(f"✅ Wantlist: {len(all_wants)} articoli")
     return all_wants
 
+# ================== 🔴🔴🔴 FUNZIONE RISCRITTA - VERSIONE SUPER-CONSERVATIVA 🔴🔴🔴 ==================
 def get_release_stats_stable(release_id):
     """
-    ✅ VERSIONE CON RATE LIMITING DINAMICO
+    ✅ VERSIONE SUPER-CONSERVATIVA - RALLENTATA PER ELIMINARE I 429
     """
     global request_timestamps
+    
+    # 🔴🔴🔴 PAUSA FISSA OBBLIGATORIA - 3 SECONDI
+    time.sleep(3)
     
     # 1. Pulisci i timestamp vecchi (più di 60 secondi)
     now = time.time()
     request_timestamps = [ts for ts in request_timestamps if now - ts < 60]
     
-    # 2. Se abbiamo già fatto più di 50 richieste nell'ultimo minuto, aspetta
-    if len(request_timestamps) >= 50:
+    # 2. Se abbiamo già fatto più di 30 richieste nell'ultimo minuto, aspetta (ridotto da 50 a 30!)
+    if len(request_timestamps) >= 30:
         oldest = min(request_timestamps)
         wait_time = 60 - (now - oldest)
         if wait_time > 0:
@@ -143,7 +147,7 @@ def get_release_stats_stable(release_id):
     request_timestamps.append(now)
     
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsStatsBot/10.0-FINAL"}
+    headers = {"User-Agent": "DiscogsStatsBot/11.0-SUPER-SLOW"}
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
@@ -153,15 +157,17 @@ def get_release_stats_stable(release_id):
         used = int(response.headers.get('X-Discogs-Ratelimit-Used', 0))
         logger.info(f"   📊 Rate limit: {remaining} rimaste, {used} usate")
         
-        # 5. Se siamo sotto 10, rallenta per il prossimo ciclo
-        if remaining < 10:
-            sleep_time = 5
+        # 5. Se siamo sotto 15, rallenta MOLTO (aumentato da 10 a 15!)
+        if remaining < 15:
+            sleep_time = 8  # Aumentato da 5 a 8 secondi!
             logger.warning(f"⚠️ Rate limit basso ({remaining}), aspetto {sleep_time}s extra")
             time.sleep(sleep_time)
-        elif remaining < 20:
-            time.sleep(2)
+        elif remaining < 25:
+            sleep_time = 5
+            logger.warning(f"⚠️ Rate limit moderato ({remaining}), aspetto {sleep_time}s")
+            time.sleep(sleep_time)
         else:
-            time.sleep(1)
+            time.sleep(2)
         
         if response.status_code == 200:
             data = response.json()
@@ -499,9 +505,10 @@ def home():
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
                 <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
                 <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>
-                <p><strong>⚡ Rate Limiting:</strong> DINAMICO</p>
+                <p><strong>⚡ Rate Limiting:</strong> SUPER-CONSERVATIVO</p>
                 <p><strong>✅ Notifiche:</strong> Con DOPPIA CONFERMA</p>
                 <p><strong>⏳ Attesa:</strong> 5 minuti tra rilevazione e conferma</p>
+                <p><strong>🚫 429:</strong> RIDOTTI AL MINIMO!</p>
             </div>
         </div>
     </body>
@@ -550,7 +557,7 @@ def debug_release():
     html += f"<p>Prezzo memorizzato: <b>{cached.get('currency', '')} {cached.get('price', 'N/D')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
     html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
-    html += f"<p><i>⚡ Doppia conferma attiva</i></p>"
+    html += f"<p><i>⚡ Doppia conferma attiva - Rate limiting super-conservativo</i></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -563,11 +570,12 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - DOPPIA CONFERMA</b>\n\n"
+        f"🧪 <b>Test Monitor - SUPER-CONSERVATIVO</b>\n\n"
         f"✅ Sistema attivo\n"
-        f"• 📊 Rate limiting DINAMICO\n"
+        f"• 📊 Rate limiting SUPER-CONSERVATIVO\n"
         f"• ✅ Doppia conferma per evitare falsi\n"
         f"• ⏳ Attesa 5 minuti tra rilevazione e notifica\n"
+        f"• 🚫 429 RIDOTTI AL MINIMO!\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
@@ -620,7 +628,7 @@ def main_loop_stable():
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio (doppia conferma) - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio (super-conservativo) - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
             monitor_stats_stable()
@@ -643,25 +651,26 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE CON DOPPIA CONFERMA")
+    logger.info("📊 DISCOGS MONITOR - VERSIONE SUPER-CONSERVATIVA")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 30")
     logger.info(f"🎲 Selezione: CASUALE")
-    logger.info(f"⚡ Rate Limiting: DINAMICO")
+    logger.info(f"⚡ Rate Limiting: SUPER-CONSERVATIVO")
     logger.info(f"✅ Doppia conferma: ATTIVA")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - DOPPIA CONFERMA</b>\n\n"
+        f"📊 <b>Discogs Monitor - SUPER-CONSERVATIVO</b>\n\n"
         f"✅ <b>CONFIGURAZIONE FINALE:</b>\n"
         f"• 🎲 30 release CASUALI per ciclo\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
-        f"• ⚡ Rate limiting DINAMICO\n"
+        f"• ⚡ Rate limiting SUPER-CONSERVATIVO\n"
         f"• ✅ Doppia conferma per evitare falsi\n"
         f"• ⏳ Attesa 5 minuti tra rilevazione e notifica\n"
-        f"• ❌ MAI notifiche alla prima rilevazione\n\n"
+        f"• ❌ MAI notifiche alla prima rilevazione\n"
+        f"• 🚫 429 RIDOTTI AL MINIMO!\n\n"
         f"👤 {USERNAME}\n"
         f"📊 {len(get_wantlist())} articoli in wantlist\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
