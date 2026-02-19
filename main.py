@@ -1,4 +1,3 @@
-import os
 import json
 import requests
 import time
@@ -121,22 +120,18 @@ def get_wantlist():
     logger.info(f"✅ Wantlist: {len(all_wants)} articoli")
     return all_wants
 
-# ================== 🔴🔴🔴 FUNZIONE RISCRITTA - VERSIONE SUPER-CONSERVATIVA 🔴🔴🔴 ==================
 def get_release_stats_stable(release_id):
     """
-    ✅ VERSIONE SUPER-CONSERVATIVA - RALLENTATA PER ELIMINARE I 429
+    ✅ VERSIONE CON RATE LIMITING DINAMICO
     """
     global request_timestamps
-    
-    # 🔴🔴🔴 PAUSA FISSA OBBLIGATORIA - 3 SECONDI
-    time.sleep(3)
     
     # 1. Pulisci i timestamp vecchi (più di 60 secondi)
     now = time.time()
     request_timestamps = [ts for ts in request_timestamps if now - ts < 60]
     
-    # 2. Se abbiamo già fatto più di 30 richieste nell'ultimo minuto, aspetta (ridotto da 50 a 30!)
-    if len(request_timestamps) >= 30:
+    # 2. Se abbiamo già fatto più di 50 richieste nell'ultimo minuto, aspetta
+    if len(request_timestamps) >= 50:
         oldest = min(request_timestamps)
         wait_time = 60 - (now - oldest)
         if wait_time > 0:
@@ -147,7 +142,7 @@ def get_release_stats_stable(release_id):
     request_timestamps.append(now)
     
     url = f"https://api.discogs.com/marketplace/stats/{release_id}"
-    headers = {"User-Agent": "DiscogsStatsBot/11.0-SUPER-SLOW"}
+    headers = {"User-Agent": "DiscogsStatsBot/10.0-FINAL"}
     
     try:
         response = requests.get(url, headers=headers, timeout=30)
@@ -157,17 +152,15 @@ def get_release_stats_stable(release_id):
         used = int(response.headers.get('X-Discogs-Ratelimit-Used', 0))
         logger.info(f"   📊 Rate limit: {remaining} rimaste, {used} usate")
         
-        # 5. Se siamo sotto 15, rallenta MOLTO (aumentato da 10 a 15!)
-        if remaining < 15:
-            sleep_time = 8  # Aumentato da 5 a 8 secondi!
+        # 5. Se siamo sotto 10, rallenta per il prossimo ciclo
+        if remaining < 10:
+            sleep_time = 5
             logger.warning(f"⚠️ Rate limit basso ({remaining}), aspetto {sleep_time}s extra")
             time.sleep(sleep_time)
-        elif remaining < 25:
-            sleep_time = 5
-            logger.warning(f"⚠️ Rate limit moderato ({remaining}), aspetto {sleep_time}s")
-            time.sleep(sleep_time)
-        else:
+        elif remaining < 20:
             time.sleep(2)
+        else:
+            time.sleep(1)
         
         if response.status_code == 200:
             data = response.json()
@@ -196,10 +189,10 @@ def get_release_stats_stable(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO - CON DOPPIA CONFERMA (1+3) ==================
+# ================== MONITORAGGIO - NOTIFICHE SOLO PER NUOVI INSERIMENTI ==================
 def monitor_stats_stable():
-    """Monitoraggio - CON DOPPIA CONFERMA per evitare falsi"""
-    logger.info("📊 Monitoraggio (doppia conferma)...")
+    """Monitoraggio - NOTIFICHE SOLO PER NUOVI INSERIMENTI"""
+    logger.info("📊 Monitoraggio (solo NUOVI inserimenti)...")
     
     wants = get_wantlist()
     if not wants:
@@ -208,9 +201,6 @@ def monitor_stats_stable():
     stats_cache = load_stats_cache()
     changes_detected = 0
     notifications_sent = 0
-    
-    # Dizionario per tracciare release in attesa di conferma
-    pending_confirmation = {}
     
     # 30 release tutte CASUALI
     check_count = min(30, len(wants))
@@ -253,111 +243,52 @@ def monitor_stats_stable():
             # PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE)
             if previous_count == -1:
                 logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
-                # Aggiorna cache subito
+                
+            # 🔴 SOLO AUMENTI DI COPIE GENERANO NOTIFICHE (NUOVI INSERIMENTI)
+            elif current_count > previous_count:
+                diff = current_count - previous_count
+                emoji = "🆕"
+                action = f"+{diff} NUOVE COPIE"
+                
+                price_display = f"{current_currency} {current_price}" if current_price != 'N/D' else 'N/D'
+                
+                msg = (
+                    f"{emoji} <b>NUOVO ANNUNCIO RILEVATO!</b>\n\n"
+                    f"🎸 <b>{artist}</b>\n"
+                    f"💿 {title}\n\n"
+                    f"📊 <b>{action}</b>\n"
+                    f"💰 Prezzo più basso: <b>{price_display}</b>\n"
+                    f"📦 Totale ora: <b>{current_count} copie</b>\n\n"
+                    f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI COPIE</a>"
+                )
+                
+                if send_telegram(msg):
+                    notifications_sent += 1
+                    changes_detected += 1
+                    logger.info(f"   🎯 NUOVO ANNUNCIO: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
+                    time.sleep(1)
+            
+            # 🔴 NESSUNA NOTIFICA PER DIMINUZIONI O VARIAZIONI PREZZO
+            elif current_count < previous_count:
+                logger.info(f"   📉 Diminuzione copie: {previous_count} → {current_count} (nessuna notifica)")
+            elif current_count == previous_count and current_price != previous_price:
+                logger.info(f"   💰 Variazione prezzo: {previous_price} → {current_price} (nessuna notifica)")
+            elif current_count > 0:
+                logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
+            
+            # AGGIORNA CACHE (SEMPRE, indipendentemente dalle notifiche)
+            if previous_count != current_count or previous_price != current_price:
                 stats_cache[release_id] = {
                     'num_for_sale': current_count,
                     'price': current_price,
                     'currency': current_currency,
                     'artist': artist,
                     'title': title,
+                    'last_change': datetime.now().isoformat() if previous_count != -1 else None,
                     'first_seen': datetime.now().isoformat(),
                     'last_check': time.time()
                 }
-                logger.info(f"   💾 Cache aggiornata: {previous_count} → {current_count}")
-                
-            # 🔴🔴🔴 MODIFICA 1+3: DOPPIA CONFERMA PER I CAMBIAMENTI 🔴🔴🔴
-            elif current_count != previous_count:
-                # Caso 1: Aumento di copie (potenziale nuovo annuncio)
-                if current_count > previous_count:
-                    # Verifica se è già in attesa di conferma
-                    if release_id in pending_confirmation:
-                        # Già in attesa dal ciclo precedente - confermato!
-                        logger.info(f"   ✅ CONFERMATO: aumento da {previous_count} a {current_count}")
-                        diff = current_count - previous_count
-                        emoji = "🆕"
-                        action = f"+{diff} NUOVE COPIE"
-                        
-                        price_display = f"{current_currency} {current_price}" if current_price != 'N/D' else 'N/D'
-                        
-                        msg = (
-                            f"{emoji} <b>NUOVO ANNUNCIO CONFERMATO!</b>\n\n"
-                            f"🎸 <b>{artist}</b>\n"
-                            f"💿 {title}\n\n"
-                            f"📊 <b>{action}</b>\n"
-                            f"💰 Prezzo più basso: <b>{price_display}</b>\n"
-                            f"📦 Totale ora: <b>{current_count} copie</b>\n\n"
-                            f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI COPIE</a>"
-                        )
-                        
-                        if send_telegram(msg):
-                            notifications_sent += 1
-                            changes_detected += 1
-                            logger.info(f"   🎯 NOTIFICA CONFERMATA #{notifications_sent}")
-                            time.sleep(1)
-                        
-                        # Rimuovi dalla lista di attesa
-                        del pending_confirmation[release_id]
-                        
-                        # Aggiorna cache
-                        stats_cache[release_id] = {
-                            'num_for_sale': current_count,
-                            'price': current_price,
-                            'currency': current_currency,
-                            'artist': artist,
-                            'title': title,
-                            'last_change': datetime.now().isoformat(),
-                            'last_check': time.time()
-                        }
-                        logger.info(f"   💾 Cache aggiornata: {previous_count} → {current_count}")
-                    
-                    else:
-                        # Prima volta che vediamo questo aumento - metti in attesa
-                        logger.info(f"   ⏳ POTENZIALE AUMENTO: {previous_count} → {current_count} - in attesa di conferma")
-                        pending_confirmation[release_id] = {
-                            'count': current_count,
-                            'price': current_price,
-                            'currency': current_currency,
-                            'artist': artist,
-                            'title': title,
-                            'timestamp': time.time()
-                        }
-                        # NON aggiornare la cache ancora!
-                
-                # Caso 2: Diminuzione di copie (vendita/rimozione) - nessuna notifica
-                elif current_count < previous_count:
-                    logger.info(f"   📉 Diminuzione copie: {previous_count} → {current_count} (nessuna notifica)")
-                    # Aggiorna cache subito
-                    stats_cache[release_id] = {
-                        'num_for_sale': current_count,
-                        'price': current_price,
-                        'currency': current_currency,
-                        'artist': artist,
-                        'title': title,
-                        'last_change': datetime.now().isoformat(),
-                        'last_check': time.time()
-                    }
-                    logger.info(f"   💾 Cache aggiornata: {previous_count} → {current_count}")
-            
-            # Caso: stesso numero di copie ma prezzo cambiato
-            elif current_count == previous_count and current_price != previous_price:
-                logger.info(f"   💰 Variazione prezzo: {previous_price} → {current_price} (nessuna notifica)")
-                # Aggiorna cache
-                stats_cache[release_id] = {
-                    'num_for_sale': current_count,
-                    'price': current_price,
-                    'currency': current_currency,
-                    'artist': artist,
-                    'title': title,
-                    'last_check': time.time()
-                }
-                logger.info(f"   💾 Cache aggiornata: prezzo {previous_price} → {current_price}")
-            
-            # Caso: stabile con copie
-            elif current_count > 0:
-                logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
-                # Aggiorna solo last_check
-                if release_id in stats_cache:
-                    stats_cache[release_id]['last_check'] = time.time()
+                logger.info(f"   💾 Cache aggiornata: {previous_count} copie, {previous_price} → {current_count} copie, {current_price}")
             
         except Exception as e:
             logger.error(f"❌ Errore release {i+1}: {e}")
@@ -368,19 +299,9 @@ def monitor_stats_stable():
         else:
             time.sleep(random.uniform(0.3, 0.6))
     
-    # Pulisci pending_confirmation vecchie (più di 10 minuti)
-    now = time.time()
-    expired = [rid for rid, data in pending_confirmation.items() 
-               if now - data.get('timestamp', 0) > 600]  # 10 minuti
-    for rid in expired:
-        logger.info(f"   ⌛ Rimuovo attesa scaduta per {rid}")
-        del pending_confirmation[rid]
-    
     save_stats_cache(stats_cache)
     
-    logger.info(f"✅ Rilevati {changes_detected} NUOVI INSERIMENTI CONFERMATI, {notifications_sent} notifiche inviate")
-    if pending_confirmation:
-        logger.info(f"⏳ {len(pending_confirmation)} release in attesa di conferma")
+    logger.info(f"✅ Rilevati {changes_detected} NUOVI INSERIMENTI, {notifications_sent} notifiche inviate")
     return changes_detected
 
 # ================== FLASK APP (IDENTICA) ==================
@@ -400,7 +321,7 @@ def emergency_start():
     global EMERGENCY_STOP
     EMERGENCY_STOP = False
     logger.warning("✅ Bot riattivato")
-    send_telegram("✅ Bot RIATTIVATO - Notifiche con DOPPIA CONFERMA")
+    send_telegram("✅ Bot RIATTIVATO - Notifiche solo per NUOVI INSERIMENTI")
     return "<h1>✅ Bot riattivato</h1>", 200
 
 # === ENDPOINT DI EMERGENZA RECUPERO ===
@@ -452,7 +373,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - DOPPIA CONFERMA</title>
+        <title>📊 Discogs Monitor - SOLO NUOVI INSERIMENTI</title>
         <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
@@ -469,7 +390,7 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - DOPPIA CONFERMA</h1>
+            <h1>📊 Discogs Monitor - SOLO NUOVI INSERIMENTI</h1>
             
             <div style="margin: 20px 0; text-align: center;">
                 <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
@@ -505,10 +426,9 @@ def home():
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
                 <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
                 <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>
-                <p><strong>⚡ Rate Limiting:</strong> SUPER-CONSERVATIVO</p>
-                <p><strong>✅ Notifiche:</strong> Con DOPPIA CONFERMA</p>
-                <p><strong>⏳ Attesa:</strong> 5 minuti tra rilevazione e conferma</p>
-                <p><strong>🚫 429:</strong> RIDOTTI AL MINIMO!</p>
+                <p><strong>⚡ Rate Limiting:</strong> DINAMICO</p>
+                <p><strong>✅ Notifiche:</strong> SOLO per NUOVI INSERIMENTI</p>
+                <p><strong>🚫 Nessuna notifica per:</strong> vendite, rimozioni, variazioni prezzo</p>
             </div>
         </div>
     </body>
@@ -523,7 +443,7 @@ def home_head():
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_stable, daemon=True).start()
-    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Doppia conferma attiva</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche solo per NUOVI INSERIMENTI</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -557,7 +477,7 @@ def debug_release():
     html += f"<p>Prezzo memorizzato: <b>{cached.get('currency', '')} {cached.get('price', 'N/D')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
     html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
-    html += f"<p><i>⚡ Doppia conferma attiva - Rate limiting super-conservativo</i></p>"
+    html += f"<p><i>⚡ Notifiche solo per AUMENTO copie</i></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -570,12 +490,11 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - SUPER-CONSERVATIVO</b>\n\n"
+        f"🧪 <b>Test Monitor - SOLO NUOVI INSERIMENTI</b>\n\n"
         f"✅ Sistema attivo\n"
-        f"• 📊 Rate limiting SUPER-CONSERVATIVO\n"
-        f"• ✅ Doppia conferma per evitare falsi\n"
-        f"• ⏳ Attesa 5 minuti tra rilevazione e notifica\n"
-        f"• 🚫 429 RIDOTTI AL MINIMO!\n"
+        f"• 📊 Rate limiting DINAMICO\n"
+        f"• ✅ Notifiche solo per AUMENTO copie\n"
+        f"• 🚫 Nessuna notifica per vendite o variazioni prezzo\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
@@ -628,7 +547,7 @@ def main_loop_stable():
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio (super-conservativo) - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
             monitor_stats_stable()
@@ -651,26 +570,25 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE SUPER-CONSERVATIVA")
+    logger.info("📊 DISCOGS MONITOR - NOTIFICHE SOLO NUOVI INSERIMENTI")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 30")
     logger.info(f"🎲 Selezione: CASUALE")
-    logger.info(f"⚡ Rate Limiting: SUPER-CONSERVATIVO")
-    logger.info(f"✅ Doppia conferma: ATTIVA")
+    logger.info(f"⚡ Rate Limiting: DINAMICO")
+    logger.info(f"✅ Notifiche: SOLO per AUMENTO copie")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - SUPER-CONSERVATIVO</b>\n\n"
+        f"📊 <b>Discogs Monitor - NOTIFICHE SOLO NUOVI INSERIMENTI</b>\n\n"
         f"✅ <b>CONFIGURAZIONE FINALE:</b>\n"
         f"• 🎲 30 release CASUALI per ciclo\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
-        f"• ⚡ Rate limiting SUPER-CONSERVATIVO\n"
-        f"• ✅ Doppia conferma per evitare falsi\n"
-        f"• ⏳ Attesa 5 minuti tra rilevazione e notifica\n"
+        f"• ⚡ Rate limiting DINAMICO\n"
+        f"• ✅ Notifiche SOLO per NUOVI INSERIMENTI\n"
         f"• ❌ MAI notifiche alla prima rilevazione\n"
-        f"• 🚫 429 RIDOTTI AL MINIMO!\n\n"
+        f"• 🚫 NESSUNA notifica per vendite o variazioni prezzo\n\n"
         f"👤 {USERNAME}\n"
         f"📊 {len(get_wantlist())} articoli in wantlist\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
