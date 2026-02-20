@@ -11,7 +11,7 @@ import logging
 # ================== CONFIG ==================
 CHECK_INTERVAL = 300  # 5 minuti
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
+TG_CHAT = os.environ.get("CHAT_ID_GRUPPO")  # <--- MODIFICATO: ora usa CHAT_ID_GRUPPO
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 USERNAME = os.environ.get("DISCOGS_USERNAME")
 
@@ -563,7 +563,7 @@ def main_loop_stable():
 
 # ================== STARTUP ==================
 if __name__ == "__main__":
-    required = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]
+    required = ["TELEGRAM_TOKEN", "CHAT_ID_GRUPPO", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]  # <--- MODIFICATO: ora richiede CHAT_ID_GRUPPO
     missing = [var for var in required if not os.environ.get(var)]
     
     if missing:
