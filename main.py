@@ -11,11 +11,11 @@ import logging
 # ================== CONFIG ==================
 CHECK_INTERVAL = 300  # 5 minuti
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TG_CHAT = os.environ.get("CHAT_ID_GRUPPO")  # <--- MODIFICATO: ora usa CHAT_ID_GRUPPO
+TG_CHAT = os.environ.get("CHAT_ID_GRUPPO")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 USERNAME = os.environ.get("DISCOGS_USERNAME")
 
-SEEN_FILE = "stats_seen.json"
+SEEN_FILE = "notified_ids.json"  # Nuovo: file per ID già notificati (anti-spam)
 LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
 
@@ -55,6 +55,25 @@ def send_telegram(msg):
         return response.status_code == 200
     except:
         return False
+
+# ================== GESTIONE ID NOTIFICATI (ANTI-SPAM) ==================
+def load_notified():
+    """Carica l'insieme degli ID notifica già inviati"""
+    try:
+        if os.path.exists(SEEN_FILE):
+            with open(SEEN_FILE, "r") as f:
+                return set(json.load(f))
+    except:
+        pass
+    return set()
+
+def save_notified(notified):
+    """Salva l'insieme degli ID notifica"""
+    try:
+        with open(SEEN_FILE, "w") as f:
+            json.dump(list(notified), f, indent=2)
+    except:
+        pass
 
 # ================== STATS CACHE ==================
 def load_stats_cache():
@@ -190,16 +209,17 @@ def get_release_stats_stable(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO - NOTIFICHE SOLO PER NUOVI INSERIMENTI ==================
+# ================== MONITORAGGIO - CASUALE CON ANTI-SPAM ==================
 def monitor_stats_stable():
-    """Monitoraggio - NOTIFICHE SOLO PER NUOVI INSERIMENTI"""
-    logger.info("📊 Monitoraggio (solo NUOVI inserimenti)...")
+    """Monitoraggio - CASUALE con ANTI-SPAM per evitare notifiche doppie"""
+    logger.info("📊 Monitoraggio (casuale con anti-spam)...")
     
     wants = get_wantlist()
     if not wants:
         return 0
     
     stats_cache = load_stats_cache()
+    notified_ids = load_notified()
     changes_detected = 0
     notifications_sent = 0
     
@@ -241,12 +261,15 @@ def monitor_stats_stable():
             previous_count = previous.get('num_for_sale', -1)
             previous_price = previous.get('price', 'N/D')
             
+            # 🔴 ANTI-SPAM: genera un ID univoco per questa notifica (release + conteggio + data)
+            notification_id = f"{release_id}_{current_count}_{current_price}_{datetime.now().strftime('%Y%m%d')}"
+            
             # PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE)
             if previous_count == -1:
                 logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
                 
-            # 🔴 SOLO AUMENTI DI COPIE GENERANO NOTIFICHE (NUOVI INSERIMENTI)
-            elif current_count > previous_count:
+            # 🔴 SOLO AUMENTI DI COPIE E NON GIÀ NOTIFICATO OGGI
+            elif current_count > previous_count and notification_id not in notified_ids:
                 diff = current_count - previous_count
                 emoji = "🆕"
                 action = f"+{diff} NUOVE COPIE"
@@ -266,6 +289,7 @@ def monitor_stats_stable():
                 if send_telegram(msg):
                     notifications_sent += 1
                     changes_detected += 1
+                    notified_ids.add(notification_id)
                     logger.info(f"   🎯 NUOVO ANNUNCIO: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
                     time.sleep(1)
             
@@ -277,7 +301,7 @@ def monitor_stats_stable():
             elif current_count > 0:
                 logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
             
-            # AGGIORNA CACHE (SEMPRE, indipendentemente dalle notifiche)
+            # AGGIORNA CACHE (SEMPRE, mantenendo first_seen originale)
             if previous_count != current_count or previous_price != current_price:
                 stats_cache[release_id] = {
                     'num_for_sale': current_count,
@@ -286,10 +310,10 @@ def monitor_stats_stable():
                     'artist': artist,
                     'title': title,
                     'last_change': datetime.now().isoformat() if previous_count != -1 else None,
-                    'first_seen': datetime.now().isoformat(),
+                    'first_seen': previous.get('first_seen', datetime.now().isoformat()),  # 🔴 Mantieni data originale!
                     'last_check': time.time()
                 }
-                logger.info(f"   💾 Cache aggiornata: {previous_count} copie, {previous_price} → {current_count} copie, {current_price}")
+                logger.info(f"   💾 Cache aggiornata: {previous_count} copie → {current_count} copie")
             
         except Exception as e:
             logger.error(f"❌ Errore release {i+1}: {e}")
@@ -301,11 +325,15 @@ def monitor_stats_stable():
             time.sleep(random.uniform(0.3, 0.6))
     
     save_stats_cache(stats_cache)
+    save_notified(notified_ids)
+    
+    # Opzionale: pulisci notified_ids vecchi (più di 7 giorni)
+    # (implementazione opzionale se vuoi)
     
     logger.info(f"✅ Rilevati {changes_detected} NUOVI INSERIMENTI, {notifications_sent} notifiche inviate")
     return changes_detected
 
-# ================== FLASK APP (IDENTICA) ==================
+# ================== FLASK APP ==================
 app = Flask(__name__)
 
 # === ENDPOINT EMERGENZA STOP/START ===
@@ -322,7 +350,7 @@ def emergency_start():
     global EMERGENCY_STOP
     EMERGENCY_STOP = False
     logger.warning("✅ Bot riattivato")
-    send_telegram("✅ Bot RIATTIVATO - Notifiche solo per NUOVI INSERIMENTI")
+    send_telegram("✅ Bot RIATTIVATO - Modalità CASUALE con anti-spam")
     return "<h1>✅ Bot riattivato</h1>", 200
 
 # === ENDPOINT DI EMERGENZA RECUPERO ===
@@ -374,7 +402,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - SOLO NUOVI INSERIMENTI</title>
+        <title>📊 Discogs Monitor - CASUALE CON ANTI-SPAM</title>
         <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
@@ -391,7 +419,7 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - SOLO NUOVI INSERIMENTI</h1>
+            <h1>📊 Discogs Monitor - CASUALE CON ANTI-SPAM</h1>
             
             <div style="margin: 20px 0; text-align: center;">
                 <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
@@ -429,6 +457,7 @@ def home():
                 <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>
                 <p><strong>⚡ Rate Limiting:</strong> DINAMICO</p>
                 <p><strong>✅ Notifiche:</strong> SOLO per NUOVI INSERIMENTI</p>
+                <p><strong>🛡️ ANTI-SPAM:</strong> Attivo (nessuna notifica doppia)</p>
                 <p><strong>🚫 Nessuna notifica per:</strong> vendite, rimozioni, variazioni prezzo</p>
             </div>
         </div>
@@ -444,7 +473,7 @@ def home_head():
 @app.route("/check")
 def manual_check():
     Thread(target=monitor_stats_stable, daemon=True).start()
-    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche solo per NUOVI INSERIMENTI</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche solo per NUOVI INSERIMENTI - ANTI-SPAM attivo</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -454,8 +483,9 @@ def check_head():
 @app.route("/reset")
 def reset_cache():
     save_stats_cache({})
-    logger.warning("🔄 CACHE STATS RESETTATA!")
-    return "<h1>🔄 Cache resettata!</h1><p>Cache stats pulita.</p><a href='/'>↩️ Home</a>", 200
+    save_notified(set())
+    logger.warning("🔄 CACHE E STORICO NOTIFICHE RESETTATI!")
+    return "<h1>🔄 Reset completo!</h1><p>Cache stats e storico notifiche puliti.</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/reset", methods=['HEAD'])
 def reset_head():
@@ -478,7 +508,7 @@ def debug_release():
     html += f"<p>Prezzo memorizzato: <b>{cached.get('currency', '')} {cached.get('price', 'N/D')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
     html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
-    html += f"<p><i>⚡ Notifiche solo per AUMENTO copie</i></p>"
+    html += f"<p><i>⚡ Notifiche solo per AUMENTO copie - ANTI-SPAM attivo</i></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -491,10 +521,11 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - SOLO NUOVI INSERIMENTI</b>\n\n"
+        f"🧪 <b>Test Monitor - CASUALE CON ANTI-SPAM</b>\n\n"
         f"✅ Sistema attivo\n"
         f"• 📊 Rate limiting DINAMICO\n"
         f"• ✅ Notifiche solo per AUMENTO copie\n"
+        f"• 🛡️ ANTI-SPAM attivo\n"
         f"• 🚫 Nessuna notifica per vendite o variazioni prezzo\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
@@ -548,7 +579,7 @@ def main_loop_stable():
     while True:
         try:
             logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio - {datetime.now().strftime('%H:%M:%S')}")
+            logger.info(f"🔄 Monitoraggio (casuale con anti-spam) - {datetime.now().strftime('%H:%M:%S')}")
             logger.info('='*70)
             
             monitor_stats_stable()
@@ -563,7 +594,7 @@ def main_loop_stable():
 
 # ================== STARTUP ==================
 if __name__ == "__main__":
-    required = ["TELEGRAM_TOKEN", "CHAT_ID_GRUPPO", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]  # <--- MODIFICATO: ora richiede CHAT_ID_GRUPPO
+    required = ["TELEGRAM_TOKEN", "CHAT_ID_GRUPPO", "DISCOGS_TOKEN", "DISCOGS_USERNAME"]
     missing = [var for var in required if not os.environ.get(var)]
     
     if missing:
@@ -571,7 +602,7 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - NOTIFICHE SOLO NUOVI INSERIMENTI")
+    logger.info("📊 DISCOGS MONITOR - CASUALE CON ANTI-SPAM")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
@@ -579,15 +610,17 @@ if __name__ == "__main__":
     logger.info(f"🎲 Selezione: CASUALE")
     logger.info(f"⚡ Rate Limiting: DINAMICO")
     logger.info(f"✅ Notifiche: SOLO per AUMENTO copie")
+    logger.info(f"🛡️ ANTI-SPAM: ATTIVO")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - NOTIFICHE SOLO NUOVI INSERIMENTI</b>\n\n"
+        f"📊 <b>Discogs Monitor - CASUALE CON ANTI-SPAM</b>\n\n"
         f"✅ <b>CONFIGURAZIONE FINALE:</b>\n"
         f"• 🎲 30 release CASUALI per ciclo\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
         f"• ⚡ Rate limiting DINAMICO\n"
         f"• ✅ Notifiche SOLO per NUOVI INSERIMENTI\n"
+        f"• 🛡️ ANTI-SPAM attivo (nessuna notifica doppia)\n"
         f"• ❌ MAI notifiche alla prima rilevazione\n"
         f"• 🚫 NESSUNA notifica per vendite o variazioni prezzo\n\n"
         f"👤 {USERNAME}\n"
