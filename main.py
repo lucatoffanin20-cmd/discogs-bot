@@ -19,8 +19,9 @@ SEEN_FILE = "notified_ids.json"  # Nuovo: file per ID già notificati (anti-spam
 LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
 
-# ================== EMERGENZA STOP ==================
+# ================== VARIABILI GLOBALI ==================
 EMERGENCY_STOP = False
+CHECK_IN_PROGRESS = False  # 🔴 NUOVO: impedisce check multipli
 
 # ================== LOGGING ==================
 logging.basicConfig(
@@ -209,129 +210,146 @@ def get_release_stats_stable(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO - CASUALE CON ANTI-SPAM ==================
+# ================== MONITORAGGIO - CASUALE CON ANTI-SPAM (CON FIX CHECK MULTIPLI) ==================
 def monitor_stats_stable():
-    """Monitoraggio - CASUALE con ANTI-SPAM per evitare notifiche doppie"""
-    logger.info("📊 Monitoraggio (casuale con anti-spam)...")
+    """Monitoraggio - CASUALE con ANTI-SPAM - CON FIX CHECK MULTIPLI"""
+    global CHECK_IN_PROGRESS, EMERGENCY_STOP
     
-    wants = get_wantlist()
-    if not wants:
+    # 🔴 BLOCCA CHECK MULTIPLI
+    if CHECK_IN_PROGRESS:
+        logger.warning("⏭️ Check già in corso, salto questo ciclo")
         return 0
     
-    stats_cache = load_stats_cache()
-    notified_ids = load_notified()
-    changes_detected = 0
-    notifications_sent = 0
+    if EMERGENCY_STOP:
+        logger.info("⏸️ Bot in stop, salto ciclo")
+        return 0
     
-    # 30 release tutte CASUALI
-    check_count = min(30, len(wants))
+    CHECK_IN_PROGRESS = True
+    logger.info("📊 Monitoraggio (casuale con anti-spam)...")
     
     try:
-        releases_to_check = random.sample(wants, check_count)
-    except ValueError:
-        releases_to_check = wants
-    
-    logger.info(f"🔍 Controllo {len(releases_to_check)} release CASUALI...")
-    
-    for i, item in enumerate(releases_to_check):
-        try:
-            release_id = str(item.get('id'))
-            if not release_id:
-                continue
-                
-            basic_info = item.get('basic_information', {})
-            title = basic_info.get('title', 'Sconosciuto')
-            artists = basic_info.get('artists', [{}])
-            artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
-            
-            logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
-            
-            # Ottieni stats correnti
-            current = get_release_stats_stable(release_id)
-            
-            if current is None or current.get('num_for_sale') is None:
-                logger.error(f"   ❌ current è None per {release_id}, salto...")
-                continue
-                
-            current_count = current['num_for_sale']
-            current_price = current['price']
-            current_currency = current['currency']
-            
-            previous = stats_cache.get(release_id, {})
-            previous_count = previous.get('num_for_sale', -1)
-            previous_price = previous.get('price', 'N/D')
-            
-            # 🔴 ANTI-SPAM: genera un ID univoco per questa notifica (release + conteggio + data)
-            notification_id = f"{release_id}_{current_count}_{current_price}_{datetime.now().strftime('%Y%m%d')}"
-            
-            # PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE)
-            if previous_count == -1:
-                logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
-                
-            # 🔴 SOLO AUMENTI DI COPIE E NON GIÀ NOTIFICATO OGGI
-            elif current_count > previous_count and notification_id not in notified_ids:
-                diff = current_count - previous_count
-                emoji = "🆕"
-                action = f"+{diff} NUOVE COPIE"
-                
-                price_display = f"{current_currency} {current_price}" if current_price != 'N/D' else 'N/D'
-                
-                msg = (
-                    f"{emoji} <b>NUOVO ANNUNCIO RILEVATO!</b>\n\n"
-                    f"🎸 <b>{artist}</b>\n"
-                    f"💿 {title}\n\n"
-                    f"📊 <b>{action}</b>\n"
-                    f"💰 Prezzo più basso: <b>{price_display}</b>\n"
-                    f"📦 Totale ora: <b>{current_count} copie</b>\n\n"
-                    f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI COPIE</a>"
-                )
-                
-                if send_telegram(msg):
-                    notifications_sent += 1
-                    changes_detected += 1
-                    notified_ids.add(notification_id)
-                    logger.info(f"   🎯 NUOVO ANNUNCIO: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
-                    time.sleep(1)
-            
-            # 🔴 NESSUNA NOTIFICA PER DIMINUZIONI O VARIAZIONI PREZZO
-            elif current_count < previous_count:
-                logger.info(f"   📉 Diminuzione copie: {previous_count} → {current_count} (nessuna notifica)")
-            elif current_count == previous_count and current_price != previous_price:
-                logger.info(f"   💰 Variazione prezzo: {previous_price} → {current_price} (nessuna notifica)")
-            elif current_count > 0:
-                logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
-            
-            # AGGIORNA CACHE (SEMPRE, mantenendo first_seen originale)
-            if previous_count != current_count or previous_price != current_price:
-                stats_cache[release_id] = {
-                    'num_for_sale': current_count,
-                    'price': current_price,
-                    'currency': current_currency,
-                    'artist': artist,
-                    'title': title,
-                    'last_change': datetime.now().isoformat() if previous_count != -1 else None,
-                    'first_seen': previous.get('first_seen', datetime.now().isoformat()),  # 🔴 Mantieni data originale!
-                    'last_check': time.time()
-                }
-                logger.info(f"   💾 Cache aggiornata: {previous_count} copie → {current_count} copie")
-            
-        except Exception as e:
-            logger.error(f"❌ Errore release {i+1}: {e}")
+        wants = get_wantlist()
+        if not wants:
+            return 0
         
-        # Pausa dinamica (invariata)
-        if 'current_count' in locals() and current_count > 0:
-            time.sleep(random.uniform(0.8, 1.2))
-        else:
-            time.sleep(random.uniform(0.3, 0.6))
-    
-    save_stats_cache(stats_cache)
-    save_notified(notified_ids)
-    
-    # Opzionale: pulisci notified_ids vecchi (più di 7 giorni)
-    # (implementazione opzionale se vuoi)
-    
-    logger.info(f"✅ Rilevati {changes_detected} NUOVI INSERIMENTI, {notifications_sent} notifiche inviate")
-    return changes_detected
+        stats_cache = load_stats_cache()
+        notified_ids = load_notified()
+        changes_detected = 0
+        notifications_sent = 0
+        
+        # 30 release tutte CASUALI
+        check_count = min(30, len(wants))
+        
+        try:
+            releases_to_check = random.sample(wants, check_count)
+        except ValueError:
+            releases_to_check = wants
+        
+        logger.info(f"🔍 Controllo {len(releases_to_check)} release CASUALI...")
+        
+        for i, item in enumerate(releases_to_check):
+            try:
+                release_id = str(item.get('id'))
+                if not release_id:
+                    continue
+                    
+                basic_info = item.get('basic_information', {})
+                title = basic_info.get('title', 'Sconosciuto')
+                artists = basic_info.get('artists', [{}])
+                artist = artists[0].get('name', 'Sconosciuto') if artists else 'Sconosciuto'
+                
+                logger.info(f"[{i+1}/{len(releases_to_check)}] {artist} - {title[:40]}...")
+                
+                # Ottieni stats correnti
+                current = get_release_stats_stable(release_id)
+                
+                if current is None or current.get('num_for_sale') is None:
+                    logger.error(f"   ❌ current è None per {release_id}, salto...")
+                    continue
+                    
+                current_count = current['num_for_sale']
+                current_price = current['price']
+                current_currency = current['currency']
+                
+                previous = stats_cache.get(release_id, {})
+                previous_count = previous.get('num_for_sale', -1)
+                previous_price = previous.get('price', 'N/D')
+                
+                # 🔴 ANTI-SPAM: genera un ID univoco per questa notifica (release + conteggio + data)
+                notification_id = f"{release_id}_{current_count}_{current_price}_{datetime.now().strftime('%Y%m%d')}"
+                
+                # PRIMA RILEVAZIONE = APPRENDIMENTO (MAI NOTIFICARE)
+                if previous_count == -1:
+                    logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
+                    
+                # 🔴 SOLO AUMENTI DI COPIE E NON GIÀ NOTIFICATO OGGI
+                elif current_count > previous_count and notification_id not in notified_ids:
+                    diff = current_count - previous_count
+                    emoji = "🆕"
+                    action = f"+{diff} NUOVE COPIE"
+                    
+                    price_display = f"{current_currency} {current_price}" if current_price != 'N/D' else 'N/D'
+                    
+                    msg = (
+                        f"{emoji} <b>NUOVO ANNUNCIO RILEVATO!</b>\n\n"
+                        f"🎸 <b>{artist}</b>\n"
+                        f"💿 {title}\n\n"
+                        f"📊 <b>{action}</b>\n"
+                        f"💰 Prezzo più basso: <b>{price_display}</b>\n"
+                        f"📦 Totale ora: <b>{current_count} copie</b>\n\n"
+                        f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI COPIE</a>"
+                    )
+                    
+                    if send_telegram(msg):
+                        notifications_sent += 1
+                        changes_detected += 1
+                        notified_ids.add(notification_id)
+                        logger.info(f"   🎯 NUOVO ANNUNCIO: {action} (ora: {current_count}) - NOTIFICA #{notifications_sent}")
+                        time.sleep(1)
+                
+                # 🔴 NESSUNA NOTIFICA PER DIMINUZIONI O VARIAZIONI PREZZO
+                elif current_count < previous_count:
+                    logger.info(f"   📉 Diminuzione copie: {previous_count} → {current_count} (nessuna notifica)")
+                elif current_count == previous_count and current_price != previous_price:
+                    logger.info(f"   💰 Variazione prezzo: {previous_price} → {current_price} (nessuna notifica)")
+                elif current_count > 0:
+                    logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
+                
+                # AGGIORNA CACHE (SEMPRE, mantenendo first_seen originale)
+                if previous_count != current_count or previous_price != current_price:
+                    stats_cache[release_id] = {
+                        'num_for_sale': current_count,
+                        'price': current_price,
+                        'currency': current_currency,
+                        'artist': artist,
+                        'title': title,
+                        'last_change': datetime.now().isoformat() if previous_count != -1 else None,
+                        'first_seen': previous.get('first_seen', datetime.now().isoformat()),  # 🔴 Mantieni data originale!
+                        'last_check': time.time()
+                    }
+                    logger.info(f"   💾 Cache aggiornata: {previous_count} copie → {current_count} copie")
+                
+            except Exception as e:
+                logger.error(f"❌ Errore release {i+1}: {e}")
+            
+            # Pausa dinamica (invariata)
+            if 'current_count' in locals() and current_count > 0:
+                time.sleep(random.uniform(0.8, 1.2))
+            else:
+                time.sleep(random.uniform(0.3, 0.6))
+        
+        save_stats_cache(stats_cache)
+        save_notified(notified_ids)
+        
+        logger.info(f"✅ Rilevati {changes_detected} NUOVI INSERIMENTI, {notifications_sent} notifiche inviate")
+        return changes_detected
+        
+    except Exception as e:
+        logger.error(f"❌ Errore in monitor_stats_stable: {e}")
+        return 0
+    finally:
+        # 🔴 IMPORTANTE: resetta sempre il flag alla fine
+        CHECK_IN_PROGRESS = False
 
 # ================== FLASK APP ==================
 app = Flask(__name__)
@@ -356,6 +374,9 @@ def emergency_start():
 # === ENDPOINT DI EMERGENZA RECUPERO ===
 @app.route("/fix-now")
 def fix_now():
+    if CHECK_IN_PROGRESS:
+        return "<h1>⏳ Check già in corso!</h1><p>Attendi il completamento.</p><a href='/'>↩️ Home</a>", 429
+    
     logger.warning("🆘 AVVIO PROCEDURA DI RECUPERO EMERGENZA!")
     wants = get_wantlist()[:30]
     recovered = 0
@@ -397,6 +418,7 @@ def home():
     with_stats = sum(1 for v in cache.values() if v.get('num_for_sale', 0) > 0)
     
     status = "🟢 ONLINE" if not EMERGENCY_STOP else "🔴 BLOCCATO"
+    check_status = "⏳ In corso" if CHECK_IN_PROGRESS else "✅ Libero"
     
     return f"""
     <!DOCTYPE html>
@@ -424,6 +446,9 @@ def home():
             <div style="margin: 20px 0; text-align: center;">
                 <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
                     {status}
+                </span>
+                <span class="status" style="background: {'#28a745' if not CHECK_IN_PROGRESS else '#ffc107'}; margin-left: 10px;">
+                    {check_status}
                 </span>
             </div>
             
@@ -458,6 +483,7 @@ def home():
                 <p><strong>⚡ Rate Limiting:</strong> DINAMICO</p>
                 <p><strong>✅ Notifiche:</strong> SOLO per NUOVI INSERIMENTI</p>
                 <p><strong>🛡️ ANTI-SPAM:</strong> Attivo (nessuna notifica doppia)</p>
+                <p><strong>🔒 Check multipli:</strong> Bloccati</p>
                 <p><strong>🚫 Nessuna notifica per:</strong> vendite, rimozioni, variazioni prezzo</p>
             </div>
         </div>
@@ -469,11 +495,13 @@ def home():
 def home_head():
     return "", 200
 
-# === CHECK ===
+# === CHECK CON FIX CHECK MULTIPLI ===
 @app.route("/check")
 def manual_check():
+    if CHECK_IN_PROGRESS:
+        return "<h1>⏳ Check già in corso!</h1><p>Attendi il completamento prima di farne un altro.</p><a href='/'>↩️ Home</a>", 429
     Thread(target=monitor_stats_stable, daemon=True).start()
-    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche solo per NUOVI INSERIMENTI - ANTI-SPAM attivo</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche solo per NUOVI INSERIMENTI - ANTI-SPAM attivo - Check multipli bloccati</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -508,7 +536,7 @@ def debug_release():
     html += f"<p>Prezzo memorizzato: <b>{cached.get('currency', '')} {cached.get('price', 'N/D')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
     html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
-    html += f"<p><i>⚡ Notifiche solo per AUMENTO copie - ANTI-SPAM attivo</i></p>"
+    html += f"<p><i>⚡ Notifiche solo per AUMENTO copie - ANTI-SPAM attivo - Check multipli bloccati</i></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -526,6 +554,7 @@ def test_telegram():
         f"• 📊 Rate limiting DINAMICO\n"
         f"• ✅ Notifiche solo per AUMENTO copie\n"
         f"• 🛡️ ANTI-SPAM attivo\n"
+        f"• 🔒 Check multipli bloccati\n"
         f"• 🚫 Nessuna notifica per vendite o variazioni prezzo\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
@@ -573,16 +602,20 @@ def health_check():
 def health_head():
     return "", 200
 
-# ================== MAIN LOOP ==================
+# ================== MAIN LOOP (CON PROTEZIONE CHECK MULTIPLI) ==================
 def main_loop_stable():
+    global CHECK_IN_PROGRESS, EMERGENCY_STOP
     time.sleep(10)
     while True:
         try:
-            logger.info(f"\n{'='*70}")
-            logger.info(f"🔄 Monitoraggio (casuale con anti-spam) - {datetime.now().strftime('%H:%M:%S')}")
-            logger.info('='*70)
-            
-            monitor_stats_stable()
+            if not EMERGENCY_STOP and not CHECK_IN_PROGRESS:
+                logger.info(f"\n{'='*70}")
+                logger.info(f"🔄 Monitoraggio automatico - {datetime.now().strftime('%H:%M:%S')}")
+                logger.info('='*70)
+                
+                monitor_stats_stable()
+            elif CHECK_IN_PROGRESS:
+                logger.info("⏳ Check manuale in corso, aspetto il prossimo ciclo")
             
             logger.info(f"💤 Pausa 5 minuti...")
             for _ in range(CHECK_INTERVAL):
@@ -602,7 +635,7 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - CASUALE CON ANTI-SPAM")
+    logger.info("📊 DISCOGS MONITOR - CASUALE CON ANTI-SPAM (FIX CHECK MULTIPLI)")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
@@ -611,16 +644,18 @@ if __name__ == "__main__":
     logger.info(f"⚡ Rate Limiting: DINAMICO")
     logger.info(f"✅ Notifiche: SOLO per AUMENTO copie")
     logger.info(f"🛡️ ANTI-SPAM: ATTIVO")
+    logger.info(f"🔒 Check multipli: BLOCCATI")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - CASUALE CON ANTI-SPAM</b>\n\n"
+        f"📊 <b>Discogs Monitor - CASUALE CON ANTI-SPAM (FIX)</b>\n\n"
         f"✅ <b>CONFIGURAZIONE FINALE:</b>\n"
         f"• 🎲 30 release CASUALI per ciclo\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
         f"• ⚡ Rate limiting DINAMICO\n"
         f"• ✅ Notifiche SOLO per NUOVI INSERIMENTI\n"
         f"• 🛡️ ANTI-SPAM attivo (nessuna notifica doppia)\n"
+        f"• 🔒 Check multipli bloccati\n"
         f"• ❌ MAI notifiche alla prima rilevazione\n"
         f"• 🚫 NESSUNA notifica per vendite o variazioni prezzo\n\n"
         f"👤 {USERNAME}\n"
