@@ -208,9 +208,9 @@ def get_release_stats_stable(release_id):
     
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
-# ================== MONITORAGGIO - CON FIX ROBUSTO ANTI-SPAM ==================
+# ================== MONITORAGGIO - VERSIONE CORRETTA CON NOTIFICHE ==================
 def monitor_stats_stable():
-    """Monitoraggio - CON FIX ROBUSTO per evitare notifiche durante apprendimento"""
+    """Monitoraggio - VERSIONE CORRETTA con notifiche per aumenti"""
     global CHECK_IN_PROGRESS, EMERGENCY_STOP
     
     if CHECK_IN_PROGRESS:
@@ -222,7 +222,7 @@ def monitor_stats_stable():
         return 0
     
     CHECK_IN_PROGRESS = True
-    logger.info("📊 Monitoraggio (casuale con anti-spam)...")
+    logger.info("📊 Monitoraggio (notifiche attive)...")
     
     try:
         wants = get_wantlist()
@@ -272,31 +272,49 @@ def monitor_stats_stable():
                 previous_count = previous.get('num_for_sale', -1)
                 previous_price = previous.get('price', 'N/D')
                 
-                # 🔴 FIX ROBUSTO: Se siamo in apprendimento (CHECK_IN_PROGRESS), NON NOTIFICARE MAI
-                # 🔴 INDIPENDENTEMENTE DALLA CONDIZIONE
+                # 🔴 ANTI-SPAM: genera ID univoco per evitare notifiche doppie
+                notification_id = f"{release_id}_{current_count}_{current_price}_{datetime.now().strftime('%Y%m%d')}"
                 
-                # 🔴 PRIMA RILEVAZIONE - sempre apprendimento, mai notifica
+                # 🔴 PRIMA RILEVAZIONE - apprendimento, nessuna notifica
                 if previous_count == -1:
-                    logger.info(f"   📝 APPRENDIMENTO (prima volta): {current_count} copie (nessuna notifica)")
+                    logger.info(f"   📝 APPRENDIMENTO: {current_count} copie (nessuna notifica)")
                 
-                # 🔴 CAMBIAMENTO DURANTE APPRENDIMENTO - mai notifica
-                elif current_count != previous_count:
-                    if current_count > previous_count:
-                        logger.info(f"   📈 APPRENDIMENTO (aumento): {previous_count} → {current_count} copie (nessuna notifica)")
-                    else:
-                        logger.info(f"   📉 APPRENDIMENTO (diminuzione): {previous_count} → {current_count} copie (nessuna notifica)")
+                # 🔴 NOTIFICHE SOLO PER AUMENTI REALI (e non già notificati)
+                elif current_count > previous_count and notification_id not in notified_ids:
+                    diff = current_count - previous_count
+                    emoji = "🆕"
+                    action = f"+{diff} NUOVE COPIE"
+                    
+                    price_display = f"{current_currency} {current_price}" if current_price != 'N/D' else 'N/D'
+                    
+                    msg = (
+                        f"{emoji} <b>NUOVO ANNUNCIO RILEVATO!</b>\n\n"
+                        f"🎸 <b>{artist}</b>\n"
+                        f"💿 {title}\n\n"
+                        f"📊 <b>{action}</b>\n"
+                        f"💰 Prezzo più basso: <b>{price_display}</b>\n"
+                        f"📦 Totale ora: <b>{current_count} copie</b>\n\n"
+                        f"🔗 <a href='https://www.discogs.com/sell/list?release_id={release_id}'>VEDI COPIE</a>"
+                    )
+                    
+                    if send_telegram(msg):
+                        notifications_sent += 1
+                        changes_detected += 1
+                        notified_ids.add(notification_id)
+                        logger.info(f"   🎯 NOTIFICA INVIATA: {action}")
+                        time.sleep(1)
                 
-                # 🔴 VARIAZIONE PREZZO DURANTE APPRENDIMENTO - mai notifica
+                # 🔴 DIMINUZIONI - nessuna notifica
+                elif current_count < previous_count:
+                    logger.info(f"   📉 Diminuzione copie: {previous_count} → {current_count} (nessuna notifica)")
+                
+                # 🔴 VARIAZIONI PREZZO - nessuna notifica
                 elif current_price != previous_price:
-                    logger.info(f"   💰 APPRENDIMENTO (variazione prezzo): {previous_price} → {current_price} (nessuna notifica)")
+                    logger.info(f"   💰 Variazione prezzo: {previous_price} → {current_price} (nessuna notifica)")
                 
                 # 🔴 STABILE
                 elif current_count > 0:
                     logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
-                
-                # 🔴 NOTIFICHE SOLO SE NON SIAMO IN APPRENDIMENTO (cioè mai qui, ma lasciamo per completezza)
-                # Questa parte non verrà mai eseguita perché CHECK_IN_PROGRESS è True,
-                # ma la lasciamo per chiarezza
                 
                 # AGGIORNA CACHE (SEMPRE)
                 if previous_count != current_count or previous_price != current_price:
@@ -324,7 +342,7 @@ def monitor_stats_stable():
         save_stats_cache(stats_cache)
         save_notified(notified_ids)
         
-        logger.info(f"✅ Rilevati {changes_detected} NUOVI INSERIMENTI, {notifications_sent} notifiche inviate")
+        logger.info(f"✅ Rilevati {changes_detected} AUMENTI, {notifications_sent} notifiche inviate")
         return changes_detected
         
     except Exception as e:
@@ -350,7 +368,7 @@ def emergency_start():
     global EMERGENCY_STOP
     EMERGENCY_STOP = False
     logger.warning("✅ Bot riattivato")
-    send_telegram("✅ Bot RIATTIVATO - Modalità CASUALE con anti-spam")
+    send_telegram("✅ Bot RIATTIVATO - Notifiche attive")
     return "<h1>✅ Bot riattivato</h1>", 200
 
 # === ENDPOINT DI EMERGENZA RECUPERO ===
@@ -406,7 +424,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 Discogs Monitor - FIX ROBUSTO</title>
+        <title>📊 Discogs Monitor - VERSIONE FINALE</title>
         <meta charset="UTF-8">
         <style>
             body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
@@ -423,7 +441,7 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>📊 Discogs Monitor - FIX ROBUSTO</h1>
+            <h1>📊 Discogs Monitor - VERSIONE FINALE</h1>
             
             <div style="margin: 20px 0; text-align: center;">
                 <span class="status" style="background: {'#28a745' if not EMERGENCY_STOP else '#dc3545'};">
@@ -463,8 +481,8 @@ def home():
                 <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
                 <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>
                 <p><strong>⚡ Rate Limiting:</strong> DINAMICO</p>
-                <p><strong>✅ FIX ROBUSTO:</strong> Nessuna notifica durante apprendimento</p>
-                <p><strong>🛡️ ANTI-SPAM:</strong> Attivo</p>
+                <p><strong>✅ Stato:</strong> NOTIFICHE ATTIVE</p>
+                <p><strong>🛡️ ANTI-SPAM:</strong> Attivo (nessuna notifica doppia)</p>
                 <p><strong>🔒 Check multipli:</strong> Bloccati</p>
             </div>
         </div>
@@ -481,7 +499,7 @@ def manual_check():
     if CHECK_IN_PROGRESS:
         return "<h1>⏳ Check già in corso!</h1><p>Attendi il completamento prima di farne un altro.</p><a href='/'>↩️ Home</a>", 429
     Thread(target=monitor_stats_stable, daemon=True).start()
-    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ FIX ROBUSTO attivo - Nessuna notifica durante apprendimento</p><a href='/'>↩️ Home</a>", 200
+    return "<h1>🚀 Monitoraggio avviato!</h1><p>✅ Notifiche ATTIVE</p><a href='/'>↩️ Home</a>", 200
 
 @app.route("/check", methods=['HEAD'])
 def check_head():
@@ -514,7 +532,7 @@ def debug_release():
     html += f"<p>Prezzo memorizzato: <b>{cached.get('currency', '')} {cached.get('price', 'N/D')}</b></p>"
     html += f"<p>Prima rilevazione: <b>{cached.get('first_seen', 'Mai')}</b></p>"
     html += f"<p><b>{'🔴 IN APPRENDIMENTO' if not cached else '✅ MONITORATA'}</b></p>"
-    html += f"<p><i>⚡ FIX ROBUSTO attivo - Nessuna notifica durante apprendimento</i></p>"
+    html += f"<p><i>✅ Notifiche ATTIVE per aumenti</i></p>"
     html += "<br><a href='/'>↩️ Home</a>"
     
     return html, 200
@@ -526,12 +544,8 @@ def debug_head():
 @app.route("/test")
 def test_telegram():
     success = send_telegram(
-        f"🧪 <b>Test Monitor - FIX ROBUSTO</b>\n\n"
-        f"✅ Sistema attivo\n"
-        f"• 📊 Rate limiting DINAMICO\n"
-        f"• ✅ FIX ROBUSTO: nessuna notifica durante apprendimento\n"
-        f"• 🛡️ ANTI-SPAM attivo\n"
-        f"• 🔒 Check multipli bloccati\n"
+        f"🧪 <b>Test - VERSIONE FINALE</b>\n\n"
+        f"✅ Sistema attivo - NOTIFICHE FUNZIONANTI\n"
         f"👤 {USERNAME}\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
     )
@@ -608,28 +622,25 @@ if __name__ == "__main__":
         exit(1)
     
     logger.info('='*70)
-    logger.info("📊 DISCOGS MONITOR - VERSIONE CON FIX ROBUSTO")
+    logger.info("📊 DISCOGS MONITOR - VERSIONE FINALE CON NOTIFICHE")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
     logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
     logger.info(f"🔍 Release/ciclo: 30")
     logger.info(f"🎲 Selezione: CASUALE")
     logger.info(f"⚡ Rate Limiting: DINAMICO")
-    logger.info(f"✅ FIX ROBUSTO: ATTIVO (nessuna notifica durante apprendimento)")
+    logger.info(f"✅ NOTIFICHE: ATTIVE per AUMENTI")
     logger.info(f"🛡️ ANTI-SPAM: ATTIVO")
-    logger.info(f"🔒 Check multipli: BLOCCATI")
     logger.info('='*70)
     
     send_telegram(
-        f"📊 <b>Discogs Monitor - FIX ROBUSTO</b>\n\n"
-        f"✅ <b>CONFIGURAZIONE FINALE:</b>\n"
+        f"📊 <b>Discogs Monitor - VERSIONE FINALE</b>\n\n"
+        f"✅ <b>CONFIGURAZIONE:</b>\n"
         f"• 🎲 30 release CASUALI per ciclo\n"
         f"• ⏰ Controllo ogni 5 minuti\n"
         f"• ⚡ Rate limiting DINAMICO\n"
-        f"• ✅ FIX ROBUSTO: nessuna notifica durante apprendimento\n"
-        f"• 🛡️ ANTI-SPAM attivo\n"
-        f"• 🔒 Check multipli bloccati\n"
-        f"• ❌ MAI notifiche alla prima rilevazione\n\n"
+        f"• ✅ NOTIFICHE ATTIVE per aumenti\n"
+        f"• 🛡️ ANTI-SPAM attivo\n\n"
         f"👤 {USERNAME}\n"
         f"📊 {len(get_wantlist())} articoli in wantlist\n"
         f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}"
