@@ -19,6 +19,14 @@ SEEN_FILE = "notified_ids.json"
 LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
 
+# ================== BLACKLIST (release da ignorare) ==================
+# Inserisci qui gli ID delle release che vuoi IGNORARE COMPLETAMENTE
+# Li trovi nell'URL su Discogs: discogs.com/release/[QUESTO_NUMERO]...
+BLACKLIST = [
+    "1926862",
+    "24289031",
+]
+
 # ================== VARIABILI GLOBALI ==================
 EMERGENCY_STOP = False
 CHECK_IN_PROGRESS = False  # Impedisce check multipli
@@ -249,7 +257,12 @@ def monitor_stats_stable():
                 release_id = str(item.get('id'))
                 if not release_id:
                     continue
-                    
+                
+                # 🔴🔴🔴 CONTROLLO BLACKLIST 🔴🔴🔴
+                if release_id in BLACKLIST:
+                    logger.info(f"   ⏭️ Release {release_id} in blacklist, saltata")
+                    continue
+                
                 basic_info = item.get('basic_information', {})
                 title = basic_info.get('title', 'Sconosciuto')
                 artists = basic_info.get('artists', [{}])
