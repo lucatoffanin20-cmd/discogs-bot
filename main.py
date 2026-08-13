@@ -10,7 +10,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 # ================== CONFIG ==================
-CHECK_INTERVAL = 300  # 5 minuti
+CHECK_INTERVAL = 60          # pausa tra un ciclo e l'altro (secondi)
+RELEASES_PER_CYCLE = 100     # release controllate ad ogni ciclo (in rotazione, non casuali)
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TG_CHAT = os.environ.get("CHAT_ID_GRUPPO")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
@@ -21,6 +22,10 @@ LOG_FILE = "discogs_stats.log"
 STATS_CACHE_FILE = "stats_cache.json"
 
 NOTIFIED_RETENTION_DAYS = 14  # dopo quanti giorni un ID notificato può essere dimenticato
+
+# Discogs: 60 richieste/min per client autenticati. Teniamo un margine di sicurezza
+# reale sotto quella soglia, condiviso tra TUTTE le chiamate (wantlist + stats).
+MAX_REQUESTS_PER_MINUTE = 50
 
 # ================== BLACKLIST (release da ignorare) ==================
 # Inserisci qui gli ID delle release che vuoi IGNORARE COMPLETAMENTE
@@ -137,6 +142,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def format_minutes(seconds):
+    minutes = seconds / 60
+    if minutes == int(minutes):
+        n = int(minutes)
+        return f"{n} minuto" if n == 1 else f"{n} minuti"
+    return f"{seconds} secondi"
+
 # ================== TELEGRAM ==================
 def send_telegram(msg):
     if EMERGENCY_STOP:
@@ -182,7 +194,6 @@ def prune_notified(notified_ids, days=NOTIFIED_RETENTION_DAYS):
             if entry_date >= cutoff:
                 pruned.add(nid)
         except Exception:
-            # formato inatteso: lo scarto invece di tenerlo per sempre
             continue
     removed = len(notified_ids) - len(pruned)
     if removed > 0:
@@ -216,8 +227,25 @@ def save_stats_cache(cache):
     except Exception as e:
         logger.error(f"❌ Errore salvataggio cache: {e}")
 
-# ================== TRACCIAMENTO RICHIESTE PER RATE LIMIT ==================
+# ================== RATE LIMIT CONDIVISO (wantlist + stats) ==================
+# Prima, solo le chiamate stats venivano contate: se la wantlist aveva molte
+# pagine, quelle chiamate non risultavano nel conteggio e potevano far superare
+# il budget reale. Ora TUTTE le richieste verso api.discogs.com passano da qui.
 request_timestamps = []
+
+def wait_for_rate_budget():
+    global request_timestamps
+    now = time.time()
+    request_timestamps = [ts for ts in request_timestamps if now - ts < 60]
+
+    if len(request_timestamps) >= MAX_REQUESTS_PER_MINUTE:
+        oldest = min(request_timestamps)
+        wait_time = 60 - (now - oldest)
+        if wait_time > 0:
+            logger.warning(f"⏳ Rallento per {wait_time:.1f}s (già fatte {len(request_timestamps)} richieste nell'ultimo minuto)")
+            time.sleep(wait_time)
+
+    request_timestamps.append(time.time())
 
 def get_wantlist():
     """Ottieni wantlist completa"""
@@ -227,11 +255,13 @@ def get_wantlist():
     logger.info(f"📥 Scaricamento wantlist...")
 
     while True:
+        wait_for_rate_budget()
+
         url = f"https://api.discogs.com/users/{USERNAME}/wants"
         params = {'page': page, 'per_page': 100}
         headers = {
             "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-            "User-Agent": "DiscogsStatsBot/11.0-FINAL"
+            "User-Agent": "DiscogsStatsBot/12.0-FINAL"
         }
 
         try:
@@ -252,7 +282,6 @@ def get_wantlist():
             if page >= pagination.get('pages', 1):
                 break
             page += 1
-            time.sleep(0.5)
 
         except Exception as e:
             logger.error(f"❌ Errore wantlist: {e}")
@@ -263,46 +292,26 @@ def get_wantlist():
 
 def get_release_stats_stable(release_id, max_retries=3):
     """
-    ✅ VERSIONE CON RATE LIMITING DINAMICO
-    Ora autenticata (token Discogs anche sulla chiamata stats, non solo wantlist):
-    le richieste autenticate hanno un limite più alto di quelle anonime, quindi
-    dovrebbe aiutare proprio a ridurre i 429, non solo il rallentamento manuale.
-    Il retry sui 429 è a ciclo invece che ricorsivo, per evitare chiamate annidate
-    se capitano più 429 di fila.
+    ✅ VERSIONE CON RATE LIMITING DINAMICO (budget condiviso con get_wantlist)
+    Autenticata: le richieste autenticate hanno un limite Discogs più alto di
+    quelle anonime. Il retry sui 429 è a ciclo, non ricorsivo.
     """
-    global request_timestamps
-
     for attempt in range(max_retries):
-        # 1. Pulisci i timestamp vecchi (più di 60 secondi)
-        now = time.time()
-        request_timestamps = [ts for ts in request_timestamps if now - ts < 60]
-
-        # 2. Se abbiamo già fatto più di 50 richieste nell'ultimo minuto, aspetta
-        if len(request_timestamps) >= 50:
-            oldest = min(request_timestamps)
-            wait_time = 60 - (now - oldest)
-            if wait_time > 0:
-                logger.warning(f"⏳ Rallento per {wait_time:.1f}s (già fatte {len(request_timestamps)} richieste)")
-                time.sleep(wait_time)
-
-        # 3. Registra questa richiesta
-        request_timestamps.append(time.time())
+        wait_for_rate_budget()
 
         url = f"https://api.discogs.com/marketplace/stats/{release_id}"
         headers = {
             "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-            "User-Agent": "DiscogsStatsBot/11.0-FINAL"
+            "User-Agent": "DiscogsStatsBot/12.0-FINAL"
         }
 
         try:
             response = requests.get(url, headers=headers, timeout=30)
 
-            # 4. Leggi il rate limit dalla risposta
             remaining = int(response.headers.get('X-Discogs-Ratelimit-Remaining', 60))
             used = int(response.headers.get('X-Discogs-Ratelimit-Used', 0))
             logger.info(f"   📊 Rate limit: {remaining} rimaste, {used} usate")
 
-            # 5. Se siamo sotto 10, rallenta per il prossimo ciclo
             if remaining < 10:
                 sleep_time = 5
                 logger.warning(f"⚠️ Rate limit basso ({remaining}), aspetto {sleep_time}s extra")
@@ -344,6 +353,25 @@ def get_release_stats_stable(release_id, max_retries=3):
 
     return {'num_for_sale': 0, 'price': 'N/D', 'currency': ''}
 
+# ================== ROTAZIONE (le meno controllate di recente, prima) ==================
+def select_batch(wants, stats_cache, batch_size):
+    """
+    Sceglie le release da controllare in questo ciclo, dando priorità a quelle
+    controllate meno di recente (mai controllate = priorità massima, last_check=0).
+    Niente più campionamento casuale: nel tempo si passano in rassegna TUTTE le
+    release della wantlist. La blacklist viene esclusa PRIMA di ordinare, così
+    non occupa mai posti in batch (altrimenti, non avendo mai un last_check,
+    resterebbe sempre in cima).
+    """
+    candidates = [item for item in wants if str(item.get('id')) not in BLACKLIST_SET]
+
+    def last_check_of(item):
+        rid = str(item.get('id'))
+        return stats_cache.get(rid, {}).get('last_check', 0)
+
+    candidates.sort(key=last_check_of)
+    return candidates[:batch_size]
+
 # ================== MONITORAGGIO - VERSIONE CORRETTA CON NOTIFICHE ==================
 def monitor_stats_stable():
     """Monitoraggio - VERSIONE CORRETTA con notifiche per aumenti"""
@@ -370,15 +398,9 @@ def monitor_stats_stable():
         changes_detected = 0
         notifications_sent = 0
 
-        # 30 release tutte CASUALI
-        check_count = min(30, len(wants))
+        releases_to_check = select_batch(wants, stats_cache, RELEASES_PER_CYCLE)
 
-        try:
-            releases_to_check = random.sample(wants, check_count)
-        except ValueError:
-            releases_to_check = wants
-
-        logger.info(f"🔍 Controllo {len(releases_to_check)} release CASUALI...")
+        logger.info(f"🔍 Controllo {len(releases_to_check)} release (rotazione, meno controllate prima)...")
 
         for i, item in enumerate(releases_to_check):
             current_count = None  # reset esplicito ad ogni iterazione, usato solo per la pausa finale
@@ -387,9 +409,8 @@ def monitor_stats_stable():
                 if not release_id:
                     continue
 
-                # 🔴🔴🔴 CONTROLLO BLACKLIST 🔴🔴🔴
+                # 🔴🔴🔴 CONTROLLO BLACKLIST (doppia sicurezza, select_batch già le esclude) 🔴🔴🔴
                 if release_id in BLACKLIST_SET:
-                    logger.info(f"   ⏭️ Release {release_id} in blacklist, saltata")
                     continue
 
                 basic_info = item.get('basic_information', {})
@@ -458,19 +479,17 @@ def monitor_stats_stable():
                 elif current_count > 0:
                     logger.info(f"   ℹ️ Stabili: {current_count} copie (nessuna notifica)")
 
-                # AGGIORNA CACHE (SEMPRE)
-                if previous_count != current_count or previous_price != current_price:
-                    stats_cache[release_id] = {
-                        'num_for_sale': current_count,
-                        'price': current_price,
-                        'currency': current_currency,
-                        'artist': artist,
-                        'title': title,
-                        'last_change': datetime.now().isoformat() if previous_count != -1 else None,
-                        'first_seen': previous.get('first_seen', datetime.now().isoformat()),
-                        'last_check': time.time()
-                    }
-                    logger.info(f"   💾 Cache aggiornata: {previous_count} copie → {current_count} copie")
+                # AGGIORNA CACHE (SEMPRE, anche se nulla è cambiato: serve last_check per la rotazione)
+                stats_cache[release_id] = {
+                    'num_for_sale': current_count,
+                    'price': current_price,
+                    'currency': current_currency,
+                    'artist': artist,
+                    'title': title,
+                    'last_change': datetime.now().isoformat() if previous_count not in (-1, current_count) else previous.get('last_change'),
+                    'first_seen': previous.get('first_seen', datetime.now().isoformat()),
+                    'last_check': time.time()
+                }
 
             except Exception as e:
                 logger.error(f"❌ Errore release {i+1}: {e}")
@@ -547,7 +566,6 @@ def fix_now():
                     recovered += 1
                     logger.info(f"✅ Recuperata: {artist} - {title[:30]}...")
 
-            time.sleep(0.5)
         except Exception as e:
             logger.error(f"❌ Errore recupero: {e}")
 
@@ -621,11 +639,12 @@ def home():
 
             <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; margin-top: 20px;">
                 <p><strong>👤 Utente:</strong> {USERNAME}</p>
-                <p><strong>⏰ Intervallo:</strong> 5 minuti</p>
-                <p><strong>🔍 Release per ciclo:</strong> 30 (casuali)</p>
-                <p><strong>⚡ Rate Limiting:</strong> DINAMICO (autenticato)</p>
+                <p><strong>⏰ Intervallo tra cicli:</strong> {format_minutes(CHECK_INTERVAL)}</p>
+                <p><strong>🔍 Release per ciclo:</strong> {RELEASES_PER_CYCLE}</p>
+                <p><strong>🔄 Selezione:</strong> ROTAZIONE (meno controllate prima, non casuale)</p>
+                <p><strong>⚡ Rate Limiting:</strong> DINAMICO, budget condiviso (max {MAX_REQUESTS_PER_MINUTE}/min)</p>
                 <p><strong>✅ Stato:</strong> NOTIFICHE ATTIVE</p>
-                <p><strong>🛡️ ANTI-SPAM:</strong> Attivo (nessuna notifica doppia, storico pulito ogni {NOTIFIED_RETENTION_DAYS} giorni)</p>
+                <p><strong>🛡️ ANTI-SPAM:</strong> Attivo (storico pulito ogni {NOTIFIED_RETENTION_DAYS} giorni)</p>
                 <p><strong>🔒 Check multipli:</strong> Bloccati</p>
             </div>
         </div>
@@ -747,7 +766,7 @@ def main_loop_stable():
             elif CHECK_IN_PROGRESS:
                 logger.info("⏳ Check manuale in corso, aspetto il prossimo ciclo")
 
-            logger.info(f"💤 Pausa 5 minuti...")
+            logger.info(f"💤 Pausa {format_minutes(CHECK_INTERVAL)}...")
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
@@ -767,10 +786,10 @@ if __name__ == "__main__":
     logger.info("📊 DISCOGS MONITOR - VERSIONE FINALE CON NOTIFICHE")
     logger.info('='*70)
     logger.info(f"👤 Utente: {USERNAME}")
-    logger.info(f"⏰ Intervallo: {CHECK_INTERVAL//60} minuti")
-    logger.info(f"🔍 Release/ciclo: 30")
-    logger.info(f"🎲 Selezione: CASUALE")
-    logger.info(f"⚡ Rate Limiting: DINAMICO (autenticato)")
+    logger.info(f"⏰ Intervallo: {format_minutes(CHECK_INTERVAL)}")
+    logger.info(f"🔍 Release/ciclo: {RELEASES_PER_CYCLE}")
+    logger.info(f"🔄 Selezione: ROTAZIONE (meno controllate prima)")
+    logger.info(f"⚡ Rate Limiting: DINAMICO, budget condiviso (max {MAX_REQUESTS_PER_MINUTE}/min)")
     logger.info(f"✅ NOTIFICHE: ATTIVE per AUMENTI")
     logger.info(f"🛡️ ANTI-SPAM: ATTIVO")
     logger.info('='*70)
@@ -778,9 +797,9 @@ if __name__ == "__main__":
     send_telegram(
         f"📊 <b>Discogs Monitor - VERSIONE FINALE</b>\n\n"
         f"✅ <b>CONFIGURAZIONE:</b>\n"
-        f"• 🎲 30 release CASUALI per ciclo\n"
-        f"• ⏰ Controllo ogni 5 minuti\n"
-        f"• ⚡ Rate limiting DINAMICO (autenticato)\n"
+        f"• 🔄 {RELEASES_PER_CYCLE} release per ciclo, in ROTAZIONE (non più casuali)\n"
+        f"• ⏰ Controllo ogni {format_minutes(CHECK_INTERVAL)}\n"
+        f"• ⚡ Rate limiting DINAMICO, budget condiviso (max {MAX_REQUESTS_PER_MINUTE}/min)\n"
         f"• ✅ NOTIFICHE ATTIVE per aumenti\n"
         f"• 🛡️ ANTI-SPAM attivo\n\n"
         f"👤 {USERNAME}\n"
